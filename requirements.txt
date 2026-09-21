@@ -1,6 +1,6 @@
 fastapi>=0.115
 uvicorn[standard]>=0.30
-pyembroidery>=1.46
+pyembroidery>=1.5.1
 python-multipart>=0.0.9
 requests>=2.31
 pytest>=8.0

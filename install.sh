@@ -4,6 +4,7 @@
 set -euo pipefail
 
 SUBDOMAIN="stitchdr.threewalls.co.uk"
+SUBSCRIPTION="${STITCHDR_WEBSPACE:-threewalls.co.uk}"   # Plesk subscription owning the subdomain
 CONTAINER="stitchdoctor"
 IMAGE="stitchdoctor"
 PORT="8001"          # loopback port; nginx proxies the subdomain here
@@ -31,8 +32,8 @@ fi
 if plesk bin site --info "$SUBDOMAIN" >/dev/null 2>&1; then
   echo "--> subdomain $SUBDOMAIN already exists."
 else
-  echo "==> creating subdomain $SUBDOMAIN"
-  plesk bin site --create "$SUBDOMAIN" -hosting true || {
+  echo "==> creating subdomain $SUBDOMAIN (webspace: $SUBSCRIPTION)"
+  plesk bin site --create "$SUBDOMAIN" -hosting true -webspace-name "$SUBSCRIPTION" || {
     echo "WARNING: could not create subdomain automatically." >&2
     echo "         Create it in Plesk: Websites & Domains → Add Subdomain." >&2
   }
