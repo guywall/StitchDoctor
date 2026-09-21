@@ -67,7 +67,10 @@ location / {
     client_max_body_size 50m;
 }
 EOF
-  plesk sbin nginxmgt reload
+  if ! plesk sbin nginxmgt reload 2>/dev/null; then
+    /usr/local/psa/admin/sbin/httpdmng --reconfigure-domain "$SUBDOMAIN"
+    systemctl reload nginx
+  fi
 else
   echo "WARNING: ${VHOST_DIR} not found — create the subdomain first, then re-run."
 fi
