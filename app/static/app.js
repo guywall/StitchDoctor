@@ -104,24 +104,28 @@ function renderFindings() {
     const caveat = f.caveats && f.caveats.length
       ? `<p class="caveat">⚠ ${f.caveats.join(" ")}</p>`
       : "";
+    const action = f.op
+      ? `<label><input type="checkbox" data-op="${f.op}"> Apply fix</label>`
+      : `<p class="advisory">Advisory — review on the canvas; no automatic fix.</p>`;
     div.innerHTML = `
       <span class="sev ${f.severity}">${f.severity}</span>
       <h3>${f.title}</h3>
       <p>${f.detail}</p>
       ${caveat}
       <p><em>Impact: ${f.estimated_impact}</em></p>
-      <label><input type="checkbox" data-op="${f.id}"> Apply fix</label>
+      ${action}
       <button class="explain-btn" data-finding="${f.id}">Why?</button>
     `;
     box.appendChild(div);
 
-    div.querySelector('input[type="checkbox"]').addEventListener("change", (e) => {
-      const op = e.target.dataset.op;
-      const params = opParams(f);
-      if (e.target.checked) applyOp(op, params);
-      // unchecking = undo (versions make this safe)
-      else undo();
-    });
+    const checkbox = div.querySelector('input[type="checkbox"]');
+    if (checkbox) {
+      checkbox.addEventListener("change", (e) => {
+        if (e.target.checked) applyOp(e.target.dataset.op, opParams(f));
+        // unchecking = undo (versions make this safe)
+        else undo();
+      });
+    }
     div.querySelector(".explain-btn").addEventListener("click", () => explainFinding(f.id));
   }
 }

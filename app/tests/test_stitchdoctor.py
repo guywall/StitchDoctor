@@ -82,6 +82,15 @@ def test_split_long_stitches(pattern):
     assert m["max_stitch_mm"] <= 8.0 + 0.05
 
 
+def test_finding_ops_are_valid_or_none(pattern):
+    """Every finding's op must be None (advisory) or a registered op name.
+    Guards against the UI offering 'Apply fix' on a non-existent operation."""
+    result = findings_mod.analyze(pattern, upload_ext=".dst")
+    for f in result["findings"]:
+        if f["op"] is not None:
+            assert f["op"] in ops_mod.OPS, f"unknown op '{f['op']}' in finding '{f['id']}'"
+
+
 def test_geometry_serializes_with_threads(pattern):
     """Regression: EmbThread.hex_color is a METHOD; geometry must not leak a
     bound method into the JSON payload (pydantic 500)."""

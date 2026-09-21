@@ -71,6 +71,7 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .finding p { margin: 0.2rem 0; font-size: 0.85rem; color: #555; }
 .finding .caveat { font-style: italic; color: #8a7a4a; }
 .finding label { font-size: 0.85rem; display: block; margin-top: 0.35rem; }
+.finding .advisory { font-size: 0.8rem; color: #888; font-style: italic; }
 
 canvas {
   background: #fff;

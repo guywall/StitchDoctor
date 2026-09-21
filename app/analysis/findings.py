@@ -23,6 +23,7 @@ def analyze(pattern, upload_ext: str = "") -> Dict[str, Any]:
     if raw["micro_stitch_count"]:
         findings.append({
             "id": "remove_micro_stitches",
+            "op": "remove_micro_stitches",
             "severity": "info",
             "title": f"{raw['micro_stitch_count']} redundant micro-stitches",
             "detail": (
@@ -37,6 +38,7 @@ def analyze(pattern, upload_ext: str = "") -> Dict[str, Any]:
     if raw["short_stitch_count"]:
         findings.append({
             "id": "flag_short_stitches",
+            "op": None,  # advisory only — no safe automatic fix
             "severity": "warn",
             "title": f"{raw['short_stitch_count']} abnormally short stitches",
             "detail": (
@@ -54,6 +56,7 @@ def analyze(pattern, upload_ext: str = "") -> Dict[str, Any]:
         no_trim = [j for j in long_jumps if not j["after_trim"] and not j.get("trimmed")]
         findings.append({
             "id": "add_trims",
+            "op": "add_trims",
             "severity": "warn",
             "title": f"{len(long_jumps)} long jumps (longest {worst:.1f} mm)",
             "detail": (
@@ -75,6 +78,7 @@ def analyze(pattern, upload_ext: str = "") -> Dict[str, Any]:
     if raw["long_stitch_count"]:
         findings.append({
             "id": "split_long_stitches",
+            "op": "split_long_stitches",
             "severity": "warn",
             "title": f"{raw['long_stitch_count']} very long stitches "
                      f"(longest {raw['max_stitch_mm']:.1f} mm)",
@@ -90,6 +94,7 @@ def analyze(pattern, upload_ext: str = "") -> Dict[str, Any]:
     if raw["density_hotspots"]:
         findings.append({
             "id": "flag_density",
+            "op": None,  # advisory only
             "severity": "info",
             "title": f"{len(raw['density_hotspots'])} dense regions",
             "detail": (
@@ -111,6 +116,7 @@ def analyze(pattern, upload_ext: str = "") -> Dict[str, Any]:
     if raw["isolated_runs"]:
         findings.append({
             "id": "flag_isolated",
+            "op": "remove_isolated_stitches",
             "severity": "info",
             "title": f"{len(raw['isolated_runs'])} isolated stitches",
             "detail": "Single stitches far from any other run — likely digitising artefacts.",
@@ -127,6 +133,7 @@ def analyze(pattern, upload_ext: str = "") -> Dict[str, Any]:
     if raw["jump_count"] and travel > 0:
         findings.append({
             "id": "reroute_travel",
+            "op": None,  # needs an interactive block-order picker; not auto-fixable
             "severity": "info",
             "title": f"Non-stitch travel: {travel:.0f} mm over {raw['jump_count']} jumps",
             "detail": "Reordering colour blocks can reduce total needle-up travel.",
@@ -143,6 +150,7 @@ def analyze(pattern, upload_ext: str = "") -> Dict[str, Any]:
     if raw["color_changes"] == 0 and raw["stops"] == 0 and raw["num_runs"] > 1:
         findings.append({
             "id": "flag_monochrome",
+            "op": None,
             "severity": "info",
             "title": "Single-colour design with multiple runs",
             "detail": "No colour changes found; runs are joined by jumps/trims only.",
