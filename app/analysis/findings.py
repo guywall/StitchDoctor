@@ -15,8 +15,9 @@ from .. import settings
 from . import metrics as _metrics
 
 
-def analyze(pattern, upload_ext: str = "") -> Dict[str, Any]:
-    raw = _metrics.analyze(pattern)
+def analyze(pattern, upload_ext: str = "", cfg: dict | None = None) -> Dict[str, Any]:
+    cfg = dict(cfg or settings.default_cfg())
+    raw = _metrics.analyze(pattern, cfg)
     raw["explicit_trim_format"] = upload_ext.lower().lstrip(".") in ("dst", "u01", "exp")
     findings: List[Dict[str, Any]] = []
 
@@ -27,10 +28,10 @@ def analyze(pattern, upload_ext: str = "") -> Dict[str, Any]:
             "severity": "info",
             "title": f"{raw['micro_stitch_count']} redundant micro-stitches",
             "detail": (
-                f"Stitches shorter than {settings.MICRO_STITCH_MM} mm add thread breaks "
+                f"Stitches shorter than {cfg['micro_mm']} mm add thread breaks "
                 "and machine time with no visible effect."
             ),
-            "locations": _short_stitch_locations(pattern, raw, settings.MICRO_STITCH_MM),
+            "locations": _short_stitch_locations(pattern, raw, cfg["micro_mm"]),
             "caveats": [],
             "estimated_impact": "none (visual)",
         })
@@ -42,15 +43,15 @@ def analyze(pattern, upload_ext: str = "") -> Dict[str, Any]:
             "severity": "warn",
             "title": f"{raw['short_stitch_count']} abnormally short stitches",
             "detail": (
-                f"Stitches under {settings.SHORT_STITCH_MM} mm can cause thread "
+                f"Stitches under {cfg['short_mm']} mm can cause thread "
                 "breaks or puckering. Consider the machine's minimum-stitch setting."
             ),
-            "locations": _short_stitch_locations(pattern, raw, settings.SHORT_STITCH_MM),
+            "locations": _short_stitch_locations(pattern, raw, cfg["short_mm"]),
             "caveats": ["Short stitches may be intentional (detail fills, outlines)."],
             "estimated_impact": "low",
         })
 
-    long_jumps = [j for j in raw["jumps"] if j["length_mm"] > settings.LONG_JUMP_MM]
+    long_jumps = [j for j in raw["jumps"] if j["length_mm"] > cfg["long_jump_mm"]]
     no_trim = [j for j in long_jumps if not j["after_trim"] and not j.get("trimmed")]
     if no_trim:
         worst = max(j["length_mm"] for j in no_trim)
@@ -83,10 +84,10 @@ def analyze(pattern, upload_ext: str = "") -> Dict[str, Any]:
             "title": f"{raw['long_stitch_count']} very long stitches "
                      f"(longest {raw['max_stitch_mm']:.1f} mm)",
             "detail": (
-                f"Stitches over {settings.LONG_STITCH_MM} mm may snag or fail "
+                f"Stitches over {cfg['long_mm']} mm may snag or fail "
                 "on machines with stitch-length limits."
             ),
-            "locations": _long_stitch_locations(pattern, raw),
+            "locations": _long_stitch_locations(pattern, raw, cfg["long_mm"]),
             "caveats": [],
             "estimated_impact": "low (durability)",
         })
@@ -108,7 +109,7 @@ def analyze(pattern, upload_ext: str = "") -> Dict[str, Any]:
             ],
             "caveats": [
                 "Density assumes a hoop area of "
-                f"{settings.ASSUMED_HOOP_MM} mm and grid sampling; treat as a hint, not a measurement."
+                f"{cfg['assumed_hoop_mm']} mm and grid sampling; treat as a hint, not a measurement."
             ],
             "estimated_impact": "fabric feel / puckering",
         })
@@ -166,14 +167,14 @@ def analyze(pattern, upload_ext: str = "") -> Dict[str, Any]:
 # --- location helpers --------------------------------------------------------
 
 def _short_stitch_locations(pattern, raw: Dict[str, Any], mm: float) -> List[Dict[str, Any]]:
-    """Stitch indices + endpoints of stitches shorter than mm."""
-    return _stitch_length_locations(pattern, lambda d: 0 < d < mm)
+    """Stitch indices + endpoints of stitches shorter than mm (incl. 0-length)."""
+    return _stitch_length_locations(pattern, lambda d: d < mm)
 
 
-def _long_stitch_locations(pattern, raw: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Stitch indices + endpoints of stitches longer than LONG_STITCH_MM."""
+def _long_stitch_locations(pattern, raw: Dict[str, Any], max_mm: float) -> List[Dict[str, Any]]:
+    """Stitch indices + endpoints of stitches longer than max_mm."""
     return _stitch_length_locations(
-        pattern, lambda d: d > settings.LONG_STITCH_MM)
+        pattern, lambda d: d > max_mm)
 
 
 def _stitch_length_locations(pattern, predicate) -> List[Dict[str, Any]]:
@@ -184,20 +185,25 @@ def _stitch_length_locations(pattern, predicate) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     pos = (0.0, 0.0)
     scale = settings.UNITS_PER_MM
+    seen_first_stitch = False
     for idx, s in enumerate(pattern.stitches):
         cmd = s[2] & COMMAND_MASK
         nxt = (s[0] / scale, s[1] / scale)
         if cmd == STITCH:
-            d = math.hypot(nxt[0] - pos[0], nxt[1] - pos[1])
-            if predicate(d):
-                out.append({
-                    "type": "stitch",
-                    "index": idx,
-                    "from": [round(pos[0], 2), round(pos[1], 2)],
-                    "to": [round(nxt[0], 2), round(nxt[1], 2)],
-                    "length_mm": round(d, 2),
-                })
-                if len(out) >= 200:
-                    break
+            if seen_first_stitch:
+                # skip the first stitch: its "length" from the (0,0) origin
+                # is not a real stitch length
+                d = math.hypot(nxt[0] - pos[0], nxt[1] - pos[1])
+                if predicate(d):
+                    out.append({
+                        "type": "stitch",
+                        "index": idx,
+                        "from": [round(pos[0], 2), round(pos[1], 2)],
+                        "to": [round(nxt[0], 2), round(nxt[1], 2)],
+                        "length_mm": round(d, 2),
+                    })
+                    if len(out) >= 200:
+                        break
+            seen_first_stitch = True
         pos = nxt
     return out

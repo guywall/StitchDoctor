@@ -27,8 +27,9 @@ def _make_dst(tmp_path):
     from pyembroidery import EmbPattern, STITCH, JUMP, COLOR_CHANGE, END
     p = EmbPattern()
     p.add_stitch_absolute(STITCH, 0, 0)
-    p.add_stitch_absolute(STITCH, 0, 100)
-    p.add_stitch_absolute(STITCH, 2, 100)      # micro-stitch
+    p.add_stitch_absolute(STITCH, 0, 100)      # 10 mm
+    p.add_stitch_absolute(STITCH, 2, 100)      # 0.2 mm — micro
+    p.add_stitch_absolute(STITCH, 17, 100)     # 1.5 mm — short
     p.add_stitch_absolute(STITCH, 200, 100)
     p.add_stitch_absolute(JUMP, 500, 100)      # 30 mm jump
     p.add_stitch_absolute(STITCH, 600, 100)
@@ -77,7 +78,7 @@ def test_full_flow(client, tmp_path):
     res = client.get(f"/api/compare/{pid}")
     assert res.status_code == 200
     comp = res.json()
-    assert comp["original"]["metrics"]["total_stitches"] == 7  # v1 unchanged
+    assert comp["original"]["metrics"]["total_stitches"] == 8  # v1 unchanged
     assert comp["proposed"]["metrics"]["micro_stitch_count"] == 0
 
     # undo → back to v1
@@ -110,3 +111,65 @@ def test_upload_rejects_bad_ext(client):
     res = client.post("/api/upload",
                       files={"file": ("test.exe", b"MZ junk", "application/x-msdownload")})
     assert res.status_code == 400
+
+
+def test_config_schema_endpoint(client):
+    res = client.get("/api/config")
+    assert res.status_code == 200
+    body = res.json()
+    assert "micro_mm" in body["defaults"]
+    assert body["bounds"]["micro_mm"][0] < body["bounds"]["micro_mm"][1]
+
+
+def test_settings_override_changes_counts(client, tmp_path):
+    """Raising the micro threshold must raise the micro-stitch count."""
+    dst = _make_dst(tmp_path)
+    with open(dst, "rb") as fh:
+        base = client.post("/api/upload",
+                           files={"file": ("t.dst", fh, "application/octet-stream")}).json()
+    with open(dst, "rb") as fh:
+        loose = client.post(
+            "/api/upload",
+            files={"file": ("t.dst", fh, "application/octet-stream")},
+            params={"cfg": '{"micro_mm": 1.6}'},
+        ).json()
+    assert loose["metrics"]["micro_stitch_count"] > base["metrics"]["micro_stitch_count"]
+    assert loose["cfg"]["micro_mm"] == 1.6
+
+
+def test_rebuild_toggle_off_restores(client, tmp_path):
+    """rebuild(ops=[]) must produce metrics identical to v1 (true toggle-off)."""
+    dst = _make_dst(tmp_path)
+    with open(dst, "rb") as fh:
+        up = client.post("/api/upload",
+                         files={"file": ("t.dst", fh, "application/octet-stream")}).json()
+    pid = up["pattern_id"]
+    res = client.post(f"/api/rebuild/{pid}", json={"ops": [{"op": "remove_micro_stitches"}]})
+    assert res.json()["metrics"]["micro_stitch_count"] == 0
+    # untick everything: deterministic rebuild from v1
+    res = client.post(f"/api/rebuild/{pid}", json={"ops": []})
+    assert res.json()["metrics"]["micro_stitch_count"] == up["metrics"]["micro_stitch_count"]
+
+
+def test_verify_roundtrip_matches(client, tmp_path):
+    """Export → re-import → re-check: working and re-imported metrics must
+    agree (or differ by an honest, reported delta)."""
+    dst = _make_dst(tmp_path)
+    with open(dst, "rb") as fh:
+        up = client.post("/api/upload",
+                         files={"file": ("t.dst", fh, "application/octet-stream")}).json()
+    pid = up["pattern_id"]
+    res = client.post(f"/api/verify/{pid}", json={
+        "ops": [{"op": "remove_micro_stitches"}],
+        "format": "dst",
+    })
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["format"] == "dst"
+    assert body["working"]["metrics"]["micro_stitch_count"] == 0
+    # DST round-trips stitches reliably for this design: re-import must not
+    # silently differ without the endpoint saying so
+    assert "stitch_delta" in body
+    w = body["working"]["metrics"]["total_stitches"]
+    r = body["reimported"]["metrics"]["total_stitches"]
+    assert body["stitch_delta"] == r - w

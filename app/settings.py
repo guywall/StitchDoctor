@@ -45,6 +45,49 @@ ISOLATED_RUN_MM = 4.0          # single stitch run far from others
 # Density caveat: density is measured against an assumed hoop area.
 ASSUMED_HOOP_MM = 100.0
 
+# User-tunable analysis settings (exposed in the UI; clamped to these bounds).
+ANALYSIS_SETTING_BOUNDS = {
+    "micro_mm": (0.05, 2.0),
+    "short_mm": (0.1, 5.0),
+    "long_mm": (3.0, 30.0),
+    "long_jump_mm": (5.0, 100.0),
+    "density_per_mm2": (2.0, 60.0),
+    "density_cell_mm": (2.0, 20.0),
+    "isolated_mm": (1.0, 50.0),
+}
+
+
+def default_cfg() -> dict:
+    """Analysis config with defaults from this module."""
+    return {
+        "micro_mm": MICRO_STITCH_MM,
+        "short_mm": SHORT_STITCH_MM,
+        "long_mm": LONG_STITCH_MM,
+        "long_jump_mm": LONG_JUMP_MM,
+        "density_per_mm2": DENSITY_STITCHES_PER_MM2,
+        "density_cell_mm": DENSITY_CELL_MM,
+        "density_min_stitches": DENSITY_MIN_STITCHES,
+        "isolated_mm": ISOLATED_RUN_MM,
+        "assumed_hoop_mm": ASSUMED_HOOP_MM,
+    }
+
+
+def effective_cfg(overrides: dict | None) -> dict:
+    """Merge user overrides over defaults, coercing and clamping to bounds."""
+    cfg = default_cfg()
+    if not overrides:
+        return cfg
+    for key, value in overrides.items():
+        if key not in ANALYSIS_SETTING_BOUNDS:
+            continue
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            continue
+        lo, hi = ANALYSIS_SETTING_BOUNDS[key]
+        cfg[key] = max(lo, min(hi, num))
+    return cfg
+
 # --- Optional LLM explainer (strictly additive) ------------------------------
 LLM_PROVIDER = os.environ.get("STITCHDR_LLM_PROVIDER", "").strip().lower()
 LLM_API_KEY = os.environ.get("STITCHDR_LLM_API_KEY", "").strip()

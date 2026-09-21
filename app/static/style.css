@@ -73,6 +73,74 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .finding label { font-size: 0.85rem; display: block; margin-top: 0.35rem; }
 .finding .advisory { font-size: 0.8rem; color: #888; font-style: italic; }
 
+/* --- new: settings, legend, verify, highlight ---------------------------- */
+
+.hint { font-size: 0.8rem; color: #777; margin: 0.25rem 0 0.5rem; }
+
+.finding.locating {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(179, 66, 74, 0.25);
+}
+.finding .locate-btn { font-size: 0.75rem; padding: 0.2rem 0.5rem; margin-right: 0.4rem; }
+.finding .explain-btn { font-size: 0.75rem; padding: 0.2rem 0.5rem; }
+.finding .finding-error { color: var(--high); font-size: 0.78rem; min-height: 1em; margin-top: 0.25rem; }
+.finding .finding-error:empty { margin: 0; }
+
+details.settings, details.verify {
+  margin-top: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.5rem 0.9rem;
+  background: #fcfbf9;
+}
+details.settings summary, details.verify summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.setting-row {
+  display: grid;
+  grid-template-columns: 1fr 110px 55px;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.45rem 0;
+  font-size: 0.82rem;
+}
+.setting-row input[type="range"] { width: 110px; }
+.settings-actions {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  margin-top: 0.6rem;
+  font-size: 0.82rem;
+}
+.settings-actions .inline { display: flex; gap: 0.3rem; align-items: center; }
+
+.legend {
+  font-size: 0.75rem;
+  color: #666;
+  margin-top: 0.35rem;
+  text-align: center;
+}
+
+#refresh-preview { font-size: 0.8rem; padding: 0.2rem 0.6rem; margin-left: auto; }
+
+.verify-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+  margin-top: 0.5rem;
+}
+.verify-table th, .verify-table td {
+  border-bottom: 1px solid var(--line);
+  padding: 0.3rem 0.45rem;
+  text-align: left;
+}
+.verify-table .warn { color: var(--warn); font-weight: 600; }
+.verify-table .warnrow td { background: #fdf6ec; }
+.ok { color: var(--ok); font-size: 0.85rem; font-weight: 600; }
+
 canvas {
   background: #fff;
   border: 1px solid var(--line);

@@ -99,8 +99,13 @@ def extract_runs(pattern: EmbPattern) -> List[Run]:
     return runs
 
 
-def analyze(pattern: EmbPattern) -> Dict[str, Any]:
-    """Compute the full metric set for a pattern."""
+def analyze(pattern: EmbPattern, cfg: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """Compute the full metric set for a pattern.
+
+    cfg carries the user-tunable thresholds (settings.effective_cfg());
+    defaults come from settings when omitted.
+    """
+    cfg = dict(cfg or settings.default_cfg())
     stitches = pattern.stitches
     runs = extract_runs(pattern)
 
@@ -114,6 +119,9 @@ def analyze(pattern: EmbPattern) -> Dict[str, Any]:
     trimmed_travel = 0.0   # portion of travel following an explicit trim
     last_was_trim = False
     total_stitches = 0
+    seen_first_stitch = False
+    prev_cmd = None  # command of the previous record (for run-start detection)
+    micro_count = 0
 
     pos: Tuple[float, float] = (0.0, 0.0)
 
@@ -122,7 +130,20 @@ def analyze(pattern: EmbPattern) -> Dict[str, Any]:
         nxt = (_mm(s[0]), _mm(s[1]))
         if cmd == STITCH:
             total_stitches += 1
-            stitch_lengths.append(_dist(pos, nxt))
+            if seen_first_stitch:
+                # the first stitch's "length" would be measured from the
+                # (0,0) origin — not a real stitch length; skip it.
+                # Zero-length entries are genuine duplicate stitches.
+                d = _dist(pos, nxt)
+                stitch_lengths.append(d)
+                # run-start micros are NOT counted: remove_micro_stitches
+                # deliberately keeps the first stitch after a needle-up move
+                # (it is a real punch point), so the finding must reflect
+                # only stitches the fix would actually remove.
+                is_run_start = prev_cmd is None or prev_cmd != STITCH
+                if d < cfg["micro_mm"] and not is_run_start:
+                    micro_count += 1
+            seen_first_stitch = True
         elif cmd == JUMP:
             d = _dist(pos, nxt)
             jump_lengths.append(d)
@@ -148,6 +169,7 @@ def analyze(pattern: EmbPattern) -> Dict[str, Any]:
         if _is_positioned(cmd, s[0], s[1]):
             pos = nxt
         last_was_trim = cmd == TRIM
+        prev_cmd = cmd
 
     xs = [s[0] for s in stitches]
     ys = [s[1] for s in stitches]
@@ -170,7 +192,7 @@ def analyze(pattern: EmbPattern) -> Dict[str, Any]:
         "trims": trims,
         "jumps": jumps,
         "jump_count": len(jumps),
-        "long_jump_count": sum(1 for j in jumps if j["length_mm"] > settings.LONG_JUMP_MM),
+        "long_jump_count": sum(1 for j in jumps if j["length_mm"] > cfg["long_jump_mm"]),
         "jump_travel_mm": round(sum(j["length_mm"] for j in jumps), 2),
         "total_travel_mm": round(travel_mm, 2),
         "trimmed_travel_mm": round(trimmed_travel, 2),
@@ -179,23 +201,22 @@ def analyze(pattern: EmbPattern) -> Dict[str, Any]:
         "avg_stitch_mm": round(sum(stitch_lengths) / len(stitch_lengths), 2)
         if stitch_lengths else 0.0,
         "short_stitch_count": sum(1 for l in stitch_lengths
-                                  if 0 < l < settings.SHORT_STITCH_MM),
-        "micro_stitch_count": sum(1 for l in stitch_lengths
-                                  if 0 < l < settings.MICRO_STITCH_MM),
+                                  if 0 < l < cfg["short_mm"]),
+        "micro_stitch_count": micro_count,  # removable only (run-anchors kept)
         "long_stitch_count": sum(1 for l in stitch_lengths
-                                 if l > settings.LONG_STITCH_MM),
+                                 if l > cfg["long_mm"]),
         "extents": extents,
-        "density_hotspots": _density_hotspots(runs),
-        "isolated_runs": _isolated_runs(runs),
+        "density_hotspots": _density_hotspots(runs, cfg),
+        "isolated_runs": _isolated_runs(runs, cfg),
         "explicit_trim_format": False,   # set by caller
         "stitch_lengths": stitch_lengths,
         "runs": runs,
     }
 
 
-def _density_hotspots(runs: List[Run]) -> List[Dict[str, Any]]:
+def _density_hotspots(runs: List[Run], cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Grid-based stitch density hotspots (heuristic; hoop-relative caveat)."""
-    cell = settings.DENSITY_CELL_MM
+    cell = cfg["density_cell_mm"]
     grid: Dict[Tuple[int, int], int] = {}
     for run in runs:
         for x, y in run.points:
@@ -203,7 +224,7 @@ def _density_hotspots(runs: List[Run]) -> List[Dict[str, Any]]:
             grid[key] = grid.get(key, 0) + 1
     total_cells = max(len(grid), 1)
     total_stitches = sum(grid.values())
-    if total_stitches < settings.DENSITY_MIN_STITCHES:
+    if total_stitches < cfg["density_min_stitches"]:
         return []
     avg_per_cell = total_stitches / total_cells
     hotspots = []
@@ -211,7 +232,7 @@ def _density_hotspots(runs: List[Run]) -> List[Dict[str, Any]]:
         # hotspot = cell with far more stitches than the design average,
         # and above the absolute density threshold (stitches per mm²)
         density = count / (cell * cell)
-        if density > settings.DENSITY_STITCHES_PER_MM2 and count > avg_per_cell * 4:
+        if density > cfg["density_per_mm2"] and count > avg_per_cell * 4:
             hotspots.append({
                 "x_mm": round((cx + 0.5) * cell, 1),
                 "y_mm": round((cy + 0.5) * cell, 1),
@@ -223,7 +244,7 @@ def _density_hotspots(runs: List[Run]) -> List[Dict[str, Any]]:
     return hotspots
 
 
-def _isolated_runs(runs: List[Run]) -> List[Dict[str, Any]]:
+def _isolated_runs(runs: List[Run], cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Runs whose nearest neighbour run is unusually far away."""
     out = []
     for i, run in enumerate(runs):
@@ -240,7 +261,7 @@ def _isolated_runs(runs: List[Run]) -> List[Dict[str, Any]]:
             d = math.hypot(cx - ox, cy - oy)
             if nearest is None or d < nearest:
                 nearest = d
-        if nearest is not None and nearest > settings.ISOLATED_RUN_MM:
+        if nearest is not None and nearest > cfg["isolated_mm"]:
             out.append({
                 "run_index": i,
                 "x_mm": round(cx, 1),

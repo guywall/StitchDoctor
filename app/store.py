@@ -127,6 +127,14 @@ def read_meta(pattern_id: str) -> dict:
         return json.load(fh)
 
 
+def update_meta(pattern_id: str, **fields) -> dict:
+    """Merge fields into meta.json (e.g. active op list)."""
+    meta = read_meta(pattern_id)
+    meta.update(fields)
+    _atomic_write_json(_pattern_dir(pattern_id), "meta.json", meta)
+    return meta
+
+
 def read_upload(pattern_id: str) -> tuple:
     """Return (bytes, ext) of the original upload."""
     pdir = _pattern_dir(pattern_id)

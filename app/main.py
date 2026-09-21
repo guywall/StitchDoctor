@@ -5,13 +5,14 @@ fixes (versioned pattern JSON) → live preview → export.
 """
 from __future__ import annotations
 
+import json
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import pyembroidery
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pyembroidery import EmbPattern
@@ -23,7 +24,7 @@ from .loader import load_pattern, pattern_to_bytes
 from .render.geometry import geometry
 from .store import (append_version, create_pattern, drop_versions_above,
                     latest_version, list_versions, load_version,
-                    pattern_exists, prune_expired, read_meta,
+                    pattern_exists, prune_expired, read_meta, update_meta,
                     start_prune_thread)
 from .transforms import ops as ops_mod
 
@@ -77,8 +78,17 @@ def _apply_op(pattern: EmbPattern, op_id: str, params: Dict[str, Any]) -> EmbPat
         raise HTTPException(422, str(exc))
 
 
-def _summary(pattern: EmbPattern, ext: str) -> Dict[str, Any]:
-    result = findings_mod.analyze(pattern, upload_ext=ext)
+def _cfg_for(pid: str, overrides: Optional[dict] = None) -> dict:
+    """Resolve analysis config: request overrides > stored meta > defaults."""
+    try:
+        stored = read_meta(pid).get("cfg") or {}
+    except FileNotFoundError:
+        stored = {}
+    return settings.effective_cfg(overrides or stored or None)
+
+
+def _summary(pattern: EmbPattern, ext: str, cfg: dict | None = None) -> Dict[str, Any]:
+    result = findings_mod.analyze(pattern, upload_ext=ext, cfg=cfg)
     return {
         "metrics": {k: v for k, v in result.items()
                     if k not in ("runs", "stitch_lengths", "jumps", "findings")},
@@ -91,7 +101,7 @@ def _summary(pattern: EmbPattern, ext: str) -> Dict[str, Any]:
 # API
 
 @app.post("/api/upload")
-def upload(file: UploadFile = File(...)) -> Dict[str, Any]:
+def upload(file: UploadFile = File(...), cfg: Optional[str] = None) -> Dict[str, Any]:
     ext = _require_upload_ext(file.filename or "")
     data = file.file.read()
     if not data:
@@ -102,26 +112,32 @@ def upload(file: UploadFile = File(...)) -> Dict[str, Any]:
         pattern = load_pattern(data, file.filename or "")
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(422, f"Could not parse embroidery file: {exc}") from exc
+    analysis_cfg = settings.effective_cfg(json.loads(cfg) if cfg else None)
     pid = create_pattern(file.filename, ext, data, pattern)
+    update_meta(pid, cfg=analysis_cfg)
     return {
         "pattern_id": pid,
         "version": 1,
         "versions": [1],
         "filename": read_meta(pid)["filename"],
-        **_summary(load_version(pid, 1), ext),
+        "cfg": analysis_cfg,
+        **_summary(load_version(pid, 1), ext, analysis_cfg),
     }
 
 
 @app.get("/api/pattern/{pid}")
-def get_pattern(pid: str, version: Optional[int] = None) -> Dict[str, Any]:
+def get_pattern(pid: str, version: Optional[int] = None,
+                cfg: Optional[str] = None) -> Dict[str, Any]:
     pattern = _get_pattern(pid, version)
     ext = read_meta(pid)["upload_ext"]
+    analysis_cfg = _cfg_for(pid, json.loads(cfg) if cfg else None)
     return {
         "pattern_id": pid,
         "version": version if version is not None else latest_version(pid),
         "versions": list_versions(pid),
         "filename": read_meta(pid)["filename"],
-        **_summary(pattern, ext),
+        "cfg": analysis_cfg,
+        **_summary(pattern, ext, analysis_cfg),
     }
 
 
@@ -129,6 +145,51 @@ def get_pattern(pid: str, version: Optional[int] = None) -> Dict[str, Any]:
 def get_geometry(pid: str, version: Optional[int] = None) -> Dict[str, Any]:
     pattern = _get_pattern(pid, version)
     return geometry(pattern)
+
+
+@app.get("/api/config")
+def get_config() -> Dict[str, Any]:
+    """Analysis setting schema for the UI panel."""
+    return {
+        "defaults": settings.default_cfg(),
+        "bounds": settings.ANALYSIS_SETTING_BOUNDS,
+    }
+
+
+@app.post("/api/verify/{pid}")
+def verify(pid: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    """Round-trip check: apply the given ops to v1, export to the requested
+    format, re-import the exported bytes, and re-analyse the re-imported
+    design. Never touches stored versions — this is pure what-if.
+
+    Body: {"ops": [...], "cfg": {...}, "format": "pes"}
+    """
+    ops_in = body.get("ops") or []
+    fmt = str(body.get("format") or "pes").lower().lstrip(".")
+    if fmt not in EXPORT_FORMATS:
+        raise HTTPException(400, f"Unsupported format '{fmt}'")
+    cfg = _cfg_for(pid, body.get("cfg"))
+    pattern = _get_pattern(pid, version=1)
+    applied = []
+    for item in ops_in:
+        if not isinstance(item, dict) or "op" not in item:
+            raise HTTPException(400, "each op must be an object with 'op'")
+        pattern = _apply_op(pattern, item["op"], item.get("params") or {})
+        applied.append(item["op"])
+    try:
+        exported = pattern_to_bytes(pattern, fmt)
+        reimported = load_pattern(exported, f"verify.{fmt}")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(422, f"Round-trip failed: {exc}") from exc
+    ext = read_meta(pid)["upload_ext"]
+    return {
+        "format": fmt,
+        "applied_ops": applied,
+        "working": _summary(pattern, ext, cfg),
+        "reimported": _summary(reimported, f".{fmt}", cfg),
+        "stitch_delta": (findings_mod._metrics.analyze(reimported, cfg)["total_stitches"]
+                         - findings_mod._metrics.analyze(pattern, cfg)["total_stitches"]),
+    }
 
 
 @app.post("/api/fix/{pid}")
@@ -150,6 +211,39 @@ def apply_fix(pid: str, body: Dict[str, Any]) -> Dict[str, Any]:
         "versions": list_versions(pid),
         "applied_op": body["op"],
         **_summary(load_version(pid, new_v), ext),
+    }
+
+
+@app.post("/api/rebuild/{pid}")
+def rebuild(pid: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    """Rebuild the working pattern from v1 by applying an ordered op list.
+
+    Body: {"ops": [{"op": ..., "params": {...}}, ...]}
+    This is the source of truth for the UI's per-fix toggles: the result is
+    always deterministic from the original + the current selection, so
+    unticking one fix can never revert a different one.
+    """
+    ops_in = body.get("ops") or []
+    if not isinstance(ops_in, list) or len(ops_in) > 20:
+        raise HTTPException(400, "'ops' must be a list of at most 20 items")
+    pattern = _get_pattern(pid, version=1)
+    applied = []
+    for item in ops_in:
+        if not isinstance(item, dict) or "op" not in item:
+            raise HTTPException(400, "each op must be an object with 'op'")
+        pattern = _apply_op(pattern, item["op"], item.get("params") or {})
+        applied.append(item["op"])
+    new_v = append_version(pid, pattern)
+    ext = read_meta(pid)["upload_ext"]
+    if "cfg" in body:
+        update_meta(pid, cfg=settings.effective_cfg(body.get("cfg")))
+    return {
+        "pattern_id": pid,
+        "version": new_v,
+        "versions": list_versions(pid),
+        "applied_ops": applied,
+        "cfg": read_meta(pid).get("cfg"),
+        **_summary(load_version(pid, new_v), ext, read_meta(pid).get("cfg")),
     }
 
 
@@ -183,7 +277,8 @@ def _pattern_state(pid: str) -> Dict[str, Any]:
         "pattern_id": pid,
         "version": latest,
         "versions": list_versions(pid),
-        **_summary(load_version(pid, latest), ext),
+        "cfg": read_meta(pid).get("cfg"),
+        **_summary(load_version(pid, latest), ext, read_meta(pid).get("cfg")),
     }
 
 
@@ -196,11 +291,12 @@ def compare(pid: str) -> Dict[str, Any]:
     ext = read_meta(pid)["upload_ext"]
     original = load_version(pid, 1)
     latest = load_version(pid, latest_version(pid))
+    cfg = read_meta(pid).get("cfg")
     return {
         "original": {"geometry": geometry(original),
-                     **_summary(original, ext)},
+                     **_summary(original, ext, cfg)},
         "proposed": {"geometry": geometry(latest),
-                     **_summary(latest, ext)},
+                     **_summary(latest, ext, cfg)},
     }
 
 
@@ -230,7 +326,7 @@ def explain(pid: str, body: Dict[str, Any]) -> Dict[str, Any]:
         return {"available": False,
                 "text": "No LLM provider configured; interpretation disabled."}
     pattern = _get_pattern(pid)
-    result = _summary(pattern, read_meta(pid)["upload_ext"])
+    result = _summary(pattern, read_meta(pid)["upload_ext"], read_meta(pid).get("cfg"))
     finding_id = body.get("finding_id", "")
     finding = next((f for f in result["findings"] if f["id"] == finding_id), None)
     if finding is None:

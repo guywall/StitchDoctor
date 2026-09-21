@@ -8,7 +8,7 @@ PAGE = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>@@APP_NAME@@</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🧵</text></svg>">
-<link rel="stylesheet" href="/static/style.css?v=3">
+<link rel="stylesheet" href="/static/style.css?v=5">
 </head>
 <body>
 <header>
@@ -29,7 +29,29 @@ PAGE = """<!DOCTYPE html>
     <div class="cols">
       <div class="col left">
         <h2>2. Findings</h2>
+        <p class="hint">Tick a fix to apply it. Click a finding to highlight it on the canvas.</p>
         <div id="findings"></div>
+
+        <details class="settings">
+          <summary>Analysis settings (thresholds)</summary>
+          <div id="settings-panel"></div>
+          <div class="settings-actions">
+            <label class="inline"><input type="checkbox" id="auto-analyse" checked> Re-analyse automatically</label>
+            <button id="reanalyse-btn">Re-analyse now</button>
+            <button id="settings-reset">Reset defaults</button>
+          </div>
+        </details>
+
+        <details class="verify">
+          <summary>Export round-trip check</summary>
+          <p class="hint">Applies the selected fixes to a copy, writes it out in the chosen
+             format, re-imports that file, and compares — what the machine will actually get.</p>
+          <div class="export-row">
+            <select id="verify-format"></select>
+            <button id="verify-btn">Check round-trip</button>
+          </div>
+          <div id="verify-out"></div>
+        </details>
 
         <h2>3. Export</h2>
         <div class="export-row">
@@ -49,8 +71,10 @@ PAGE = """<!DOCTYPE html>
           <label><input type="radio" name="view" value="thread" checked> Thread preview</label>
           <label><input type="radio" name="view" value="paths"> Stitch paths</label>
           <label><input type="radio" name="view" value="problems"> Problems</label>
+          <button id="refresh-preview" title="Redraw from the current pattern">↻ Redraw</button>
         </div>
         <canvas id="canvas" width="640" height="640"></canvas>
+        <div id="legend" class="legend" hidden></div>
         <div id="stats"></div>
         <div id="explain-box" hidden>
           <h3>Why this recommendation?</h3>
@@ -61,7 +85,7 @@ PAGE = """<!DOCTYPE html>
   </section>
 </main>
 
-<script src="/static/app.js?v=3"></script>
+<script src="/static/app.js?v=5"></script>
 </body>
 </html>"""
 
