@@ -1,0 +1,7 @@
+[tool.pyright]
+include = ["app"]
+exclude = ["**/__pycache__"]
+typeCheckingMode = "basic"
+reportMissingImports = false
+reportMissingModuleSource = false
+pythonVersion = "3.12"

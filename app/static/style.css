@@ -1,0 +1,100 @@
+:root {
+  --bg: #faf9f7;
+  --panel: #ffffff;
+  --ink: #2b2b2b;
+  --accent: #b3424a;
+  --ok: #3a7d44;
+  --warn: #b3822a;
+  --high: #b3424a;
+  --line: #ddd8d0;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--ink);
+  margin: 0;
+  padding: 0 1rem 3rem;
+}
+
+header { text-align: center; padding: 1.5rem 0 0.5rem; }
+h1 { margin: 0; font-size: 1.8rem; }
+.tagline { color: #777; margin: 0.25rem 0 0; }
+
+main { max-width: 1100px; margin: 0 auto; }
+
+section {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1.25rem 1.5rem;
+  margin-top: 1.25rem;
+}
+
+.cols { display: flex; gap: 1.5rem; flex-wrap: wrap; }
+.col.left { flex: 1 1 340px; }
+.col.right { flex: 1.4 1 420px; }
+
+button, select, input[type="file"] {
+  font-size: 0.95rem;
+  padding: 0.45rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+}
+
+button { cursor: pointer; }
+button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.finding {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.7rem 0.9rem;
+  margin-bottom: 0.6rem;
+}
+.finding .sev {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.1rem 0.45rem;
+  border-radius: 4px;
+  color: #fff;
+}
+.finding .sev.info { background: var(--ok); }
+.finding .sev.warn { background: var(--warn); }
+.finding .sev.high { background: var(--high); }
+.finding h3 { margin: 0.3rem 0 0.2rem; font-size: 0.98rem; }
+.finding p { margin: 0.2rem 0; font-size: 0.85rem; color: #555; }
+.finding .caveat { font-style: italic; color: #8a7a4a; }
+.finding label { font-size: 0.85rem; display: block; margin-top: 0.35rem; }
+
+canvas {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  width: 100%;
+  height: auto;
+}
+
+.view-toggle { display: flex; gap: 1rem; margin-bottom: 0.5rem; font-size: 0.85rem; }
+.view-toggle label { cursor: pointer; }
+
+#stats { font-size: 0.85rem; color: #555; margin-top: 0.5rem; white-space: pre-wrap; }
+
+.export-row, .history-row { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
+
+.error { color: var(--high); font-size: 0.9rem; min-height: 1.2em; }
+
+#explain-box {
+  margin-top: 0.75rem;
+  padding: 0.75rem 1rem;
+  border-left: 3px solid var(--accent);
+  background: #fdf6f6;
+  border-radius: 0 8px 8px 0;
+}
+#explain-box h3 { margin: 0 0 0.3rem; font-size: 0.9rem; }
+#explain-box p { margin: 0; font-size: 0.88rem; }
