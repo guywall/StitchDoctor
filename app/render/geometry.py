@@ -100,7 +100,10 @@ def geometry(pattern: EmbPattern) -> Dict[str, Any]:
     }
     threads = []
     for t in pattern.threadlist:
-        threads.append(getattr(t, "hex_color", None) or "#808080")
+        color = getattr(t, "hex_color", None)
+        if callable(color):  # EmbThread.hex_color is a method in pyembroidery
+            color = color()
+        threads.append(color or "#808080")
 
     return {
         "empty": False,

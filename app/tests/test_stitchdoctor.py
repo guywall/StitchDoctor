@@ -82,6 +82,19 @@ def test_split_long_stitches(pattern):
     assert m["max_stitch_mm"] <= 8.0 + 0.05
 
 
+def test_geometry_serializes_with_threads(pattern):
+    """Regression: EmbThread.hex_color is a METHOD; geometry must not leak a
+    bound method into the JSON payload (pydantic 500)."""
+    import json
+
+    from app.render.geometry import geometry
+
+    pattern.add_thread("#ff0000")
+    geo = geometry(pattern)
+    assert all(isinstance(c, str) for c in geo["threads"])
+    json.dumps(geo)  # must be JSON-serializable
+
+
 def test_export_roundtrip(pattern, tmp_path):
     from app.loader import pattern_to_bytes
     dst_bytes = pattern_to_bytes(pattern, "dst")
