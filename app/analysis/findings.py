@@ -51,21 +51,21 @@ def analyze(pattern, upload_ext: str = "") -> Dict[str, Any]:
         })
 
     long_jumps = [j for j in raw["jumps"] if j["length_mm"] > settings.LONG_JUMP_MM]
-    if long_jumps:
-        worst = max(j["length_mm"] for j in long_jumps)
-        no_trim = [j for j in long_jumps if not j["after_trim"] and not j.get("trimmed")]
+    no_trim = [j for j in long_jumps if not j["after_trim"] and not j.get("trimmed")]
+    if no_trim:
+        worst = max(j["length_mm"] for j in no_trim)
         findings.append({
             "id": "add_trims",
             "op": "add_trims",
             "severity": "warn",
-            "title": f"{len(long_jumps)} long jumps (longest {worst:.1f} mm)",
+            "title": f"{len(no_trim)} long jumps without trims (longest {worst:.1f} mm)",
             "detail": (
-                "Jumps this long leave visible thread across the front. "
-                f"{len(no_trim)} of them follow no trim."
+                "Jumps this long leave visible thread across the front "
+                "unless the machine trims before travelling."
             ),
             "locations": [
                 {"type": "jump", "index": j["index"], "from": j["from"], "to": j["to"]}
-                for j in long_jumps
+                for j in no_trim
             ],
             "caveats": (
                 ["Trim counts are inferred from jump sequences for this format "
