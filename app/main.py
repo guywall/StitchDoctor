@@ -243,10 +243,15 @@ def explain(pid: str, body: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.get("/api/health")
 def health() -> Dict[str, Any]:
+    try:
+        from importlib.metadata import version
+        pye_version = version("pyembroidery")
+    except Exception:  # noqa: BLE001
+        pye_version = "unknown"
     return {
         "status": "ok",
         "app": APP_NAME,
-        "pyembroidery": getattr(pyembroidery, "__version__", "unknown"),
+        "pyembroidery": pye_version,
         "llm": settings.LLM_PROVIDER if settings.llm_available() else "off",
     }
 

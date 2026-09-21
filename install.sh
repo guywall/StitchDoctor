@@ -58,7 +58,8 @@ VHOST_FILE="${VHOST_DIR}/vhost_nginx.conf"
 if [ -d "$VHOST_DIR" ]; then
   echo "==> writing nginx proxy directives"
   cat > "$VHOST_FILE" <<EOF
-location / {
+# ~ regex location avoids "duplicate location /" vs Plesk's own generated location /
+location ~ / {
     proxy_pass http://127.0.0.1:${PORT};
     proxy_set_header Host \$host;
     proxy_set_header X-Real-IP \$remote_addr;
@@ -80,7 +81,7 @@ if plesk bin site --info "$SUBDOMAIN" 2>/dev/null | grep -q "Certificate:"; then
   echo "--> certificate seems present; skipping issuance."
 else
   echo "==> requesting Let's Encrypt certificate"
-  plesk bin extension --exec letsencrypt --cli -d "$SUBDOMAIN" || {
+  plesk bin extension --exec letsencrypt cli.php -d "$SUBDOMAIN" || {
     echo "WARNING: certificate issuance failed; run it again from the Plesk UI." >&2
   }
 fi
