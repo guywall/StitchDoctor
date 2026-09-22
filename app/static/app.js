@@ -487,30 +487,49 @@ function renderVerifyOut(data) {
   const out = $("verify-out");
   if (!data) { out.innerHTML = ""; return; }
   const w = data.working.metrics, r = data.reimported.metrics;
-  const row = (label, a, b, warn) => `
+  const b = data.baseline ? data.baseline.metrics : null;
+  const row = (label, a, b_, c, warn) => `
     <tr${warn ? ' class="warnrow"' : ""}>
-      <td>${label}</td><td>${a}</td><td>${b}</td>
+      <td>${label}</td><td>${a}</td><td>${b_}</td><td>${c}</td>
       ${warn ? `<td class="warn">⚠ ${warn}</td>` : "<td></td>"}
     </tr>`;
+  // Real verdict: fixed re-import vs ORIGINAL re-import — the format's own
+  // overhead (e.g. PES trim-jump pairs) appears in BOTH and cancels out.
+  const fmt = data.format.toUpperCase();
+  const fmtNote = b
+    ? `<span class="hint">Format overhead on the untouched original: ` +
+      `${b.jump_count - w.jump_count >= 0 ? "+" : ""}${b.jump_count - w.jump_count} jumps, ` +
+      `${b.trims - w.trims >= 0 ? "+" : ""}${b.trims - w.trims} trims — ` +
+      `added by the ${fmt} writer itself, not by your fixes.</span>`
+    : "";
   const warns = [];
-  if (data.stitch_delta !== 0) warns.push(`${data.stitch_delta > 0 ? "+" : ""}${data.stitch_delta} stitches from re-import`);
-  if (w.jump_count !== r.jump_count) warns.push(`${r.jump_count - w.jump_count > 0 ? "+" : ""}${r.jump_count - w.jump_count} jumps (writer inserts trim-jump pairs)`);
-  if (w.trims !== r.trims) warns.push(`${r.trims - w.trims > 0 ? "+" : ""}${r.trims - w.trims} trims`);
+  if (b) {
+    if (r.total_stitches !== b.total_stitches)
+      warns.push(`${r.total_stitches > b.total_stitches ? "+" : ""}${r.total_stitches - b.total_stitches} stitches vs original`);
+    if (r.jump_travel_mm > b.jump_travel_mm * 1.02 + 1)
+      warns.push(`+${Math.round(r.jump_travel_mm - b.jump_travel_mm)} mm jump travel vs original`);
+  } else {
+    if (data.stitch_delta !== 0) warns.push(`${data.stitch_delta > 0 ? "+" : ""}${data.stitch_delta} stitches from re-import`);
+  }
   out.innerHTML = `
     <table class="verify-table">
-      <tr><th></th><th>Working</th><th>Re-imported ${data.format.toUpperCase()}</th><th></th></tr>
-      ${row("Stitches", w.total_stitches.toLocaleString(), r.total_stitches.toLocaleString(),
-            data.stitch_delta !== 0 ? `Δ ${data.stitch_delta > 0 ? "+" : ""}${data.stitch_delta}` : null)}
-      ${row("Jumps", w.jump_count, r.jump_count,
-            w.jump_count !== r.jump_count ? `Δ ${r.jump_count - w.jump_count}` : null)}
-      ${row("Trims", w.trims, r.trims,
-            w.trims !== r.trims ? `Δ ${r.trims - w.trims}` : null)}
-      ${row("Max stitch (mm)", w.max_stitch_mm, r.max_stitch_mm)}
-      ${row("Jump travel (mm)", w.jump_travel_mm, r.jump_travel_mm)}
+      <tr><th></th><th>Working</th><th>Original as ${fmt}</th><th>Fixed as ${fmt}</th><th></th></tr>
+      ${row("Stitches", w.total_stitches.toLocaleString(),
+            b ? b.total_stitches.toLocaleString() : "—",
+            r.total_stitches.toLocaleString(),
+            b && r.total_stitches !== b.total_stitches
+              ? `Δ ${r.total_stitches - b.total_stitches > 0 ? "+" : ""}${r.total_stitches - b.total_stitches}` : null)}
+      ${row("Jumps", w.jump_count, b ? b.jump_count : "—", r.jump_count,
+            b && r.jump_count !== b.jump_count ? `Δ ${r.jump_count - b.jump_count > 0 ? "+" : ""}${r.jump_count - b.jump_count}` : null)}
+      ${row("Trims", w.trims, b ? b.trims : "—", r.trims,
+            b && r.trims !== b.trims ? `Δ ${r.trims - b.trims > 0 ? "+" : ""}${r.trims - b.trims}` : null)}
+      ${row("Max stitch (mm)", w.max_stitch_mm, b ? b.max_stitch_mm : "—", r.max_stitch_mm)}
+      ${row("Jump travel (mm)", w.jump_travel_mm, b ? b.jump_travel_mm : "—", r.jump_travel_mm)}
     </table>
     ${warns.length
-      ? `<p class="caveat">⚠ Expected format behaviour: ${warns.join("; ")}. Stitch geometry is unaffected.</p>`
-      : '<p class="ok">✓ Round-trip is faithful.</p>'}
+      ? `<p class="caveat">⚠ vs the original as ${fmt}: ${warns.join("; ")}.</p>`
+      : '<p class="ok">✓ The fixed design sews with no extra stitches or travel vs the original.</p>'}
+    ${fmtNote}
   `;
 }
 
@@ -612,10 +631,11 @@ function drawReportCanvas(canvasEl, geo) {
   const scale = Math.min((W - pad * 2) / geo.extents.width_mm,
                          (H - pad * 2) / geo.extents.height_mm);
   const ox = (W - geo.extents.width_mm * scale) / 2 - geo.extents.min_x * scale;
-  const oy = H - (H - geo.extents.height_mm * scale) / 2 + geo.extents.min_y * scale;
+  // pyembroidery's +y is down, same as canvas — no flip needed
+  const oy = (H - geo.extents.height_mm * scale) / 2 - geo.extents.min_y * scale;
   ctx.save();
   ctx.translate(ox, oy);
-  ctx.scale(scale, -scale);
+  ctx.scale(scale, scale);
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
   const threads = geo.threads || [];

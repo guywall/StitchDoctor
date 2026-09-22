@@ -164,8 +164,9 @@ export class SDViewer {
                        (cssH - PAD * 2) / ex.height_mm);
     }
     // world origin → CSS px at fit zoom
+    // pyembroidery's +y is down, same as canvas — no flip needed
     const ox = (cssW - ex.width_mm * scale) / 2 - ex.min_x * scale;
-    const oy = cssH - (cssH - ex.height_mm * scale) / 2 + ex.min_y * scale;
+    const oy = (cssH - ex.height_mm * scale) / 2 - ex.min_y * scale;
     return { scale, ox, oy, cssW, cssH };
   }
 
@@ -182,9 +183,9 @@ export class SDViewer {
       const pts = seg.points;
       if (!pts || pts.length < 2) continue;
       const p = new Path2D();
-      p.moveTo(pts[0][0] * t.scale, -pts[0][1] * t.scale);
+      p.moveTo(pts[0][0] * t.scale, pts[0][1] * t.scale);
       for (let i = 1; i < pts.length; i++) {
-        p.lineTo(pts[i][0] * t.scale, -pts[i][1] * t.scale);
+        p.lineTo(pts[i][0] * t.scale, pts[i][1] * t.scale);
       }
       const isJump = seg.type === "jump";
       this.chunkPaths.push({
@@ -202,7 +203,7 @@ export class SDViewer {
     }
     for (const tr of this.geo.trims || []) {
       this.trimMarkers.push({
-        x: tr.x * t.scale, y: -tr.y * t.scale,
+        x: tr.x * t.scale, y: tr.y * t.scale,
         stitchAt: tr.stitch_at ?? null,
       });
     }
@@ -345,9 +346,9 @@ export class SDViewer {
       const pts = seg.points;
       if (!pts || pts.length < 2) continue;
       const p = new Path2D();
-      p.moveTo(pts[0][0] * t.scale, -pts[0][1] * t.scale);
+      p.moveTo(pts[0][0] * t.scale, pts[0][1] * t.scale);
       for (let i = 1; i < pts.length; i++) {
-        p.lineTo(pts[i][0] * t.scale, -pts[i][1] * t.scale);
+        p.lineTo(pts[i][0] * t.scale, pts[i][1] * t.scale);
       }
       paths.push({ path: p, colorIndex: seg.color, jump: seg.type === "jump",
                    stitchStart: seg.stitch_start ?? null,
@@ -357,7 +358,7 @@ export class SDViewer {
                      : _polylineLengthMm(pts) });
     }
     for (const tr of otherGeo.trims || []) {
-      trims.push({ x: tr.x * t.scale, y: -tr.y * t.scale, stitchAt: tr.stitch_at ?? null });
+      trims.push({ x: tr.x * t.scale, y: tr.y * t.scale, stitchAt: tr.stitch_at ?? null });
     }
     this._otherBaked = {
       geo: otherGeo, paths, trims,
@@ -377,7 +378,7 @@ export class SDViewer {
     const dpr = window.devicePixelRatio || 1;
     const cssH = this.canvas.height / dpr;
     const cy = cssH / 2;
-    const fy = -y * t.scale + t.oy;
+    const fy = y * t.scale + t.oy;
     return this.ty + cy + (fy - cy) * this.zoom;
   }
 
@@ -415,9 +416,9 @@ export class SDViewer {
             const n = Math.min(progress - cp.stitchStart + 1, seg.points.length);
             if (n < 2) continue;   // one point sewn — needle dot shows it
             path = new Path2D();
-            path.moveTo(seg.points[0][0] * t.scale, -seg.points[0][1] * t.scale);
+            path.moveTo(seg.points[0][0] * t.scale, seg.points[0][1] * t.scale);
             for (let i = 1; i < n; i++) {
-              path.lineTo(seg.points[i][0] * t.scale, -seg.points[i][1] * t.scale);
+              path.lineTo(seg.points[i][0] * t.scale, seg.points[i][1] * t.scale);
             }
           }
         }
@@ -452,8 +453,8 @@ export class SDViewer {
       ctx.lineWidth = 2.5 / this.zoom;
       for (const j of this.problemJumps) {
         ctx.beginPath();
-        ctx.moveTo(j.from[0] * t.scale, -j.from[1] * t.scale);
-        ctx.lineTo(j.to[0] * t.scale, -j.to[1] * t.scale);
+        ctx.moveTo(j.from[0] * t.scale, j.from[1] * t.scale);
+        ctx.lineTo(j.to[0] * t.scale, j.to[1] * t.scale);
         ctx.stroke();
       }
       ctx.restore();
@@ -582,7 +583,7 @@ export class SDViewer {
     const wy = (my - this.ty - this.canvas.height / (window.devicePixelRatio || 1) / 2)
       / this.zoom + this.canvas.height / (window.devicePixelRatio || 1) / 2;
     const fx = (wx - t.ox) / t.scale;         // world mm
-    const fy = -(wy - t.oy) / t.scale;
+    const fy = (wy - t.oy) / t.scale;
     const thresh = 6 / (t.scale * this.zoom); // 6 css px radius in world mm
     let best = null, bestD = thresh;
     for (const seg of this.geo.segments) {
@@ -633,10 +634,10 @@ export class SDViewer {
     const scale = Math.min((W - pad * 2) / geo.extents.width_mm,
                            (H - pad * 2) / geo.extents.height_mm);
     const ox = (W - geo.extents.width_mm * scale) / 2 - geo.extents.min_x * scale;
-    const oy = H - (H - geo.extents.height_mm * scale) / 2 + geo.extents.min_y * scale;
+    const oy = (H - geo.extents.height_mm * scale) / 2 - geo.extents.min_y * scale;
     ctx.save();
     ctx.translate(ox, oy);
-    ctx.scale(scale, -scale);
+    ctx.scale(scale, scale);
     const width = 0.4 * Math.max(1, Math.min(3, scale / 3));
     ctx.lineCap = "round"; ctx.lineJoin = "round";
     for (const seg of geo.segments) {

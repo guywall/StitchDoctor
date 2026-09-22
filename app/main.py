@@ -243,6 +243,11 @@ def verify(pid: str, body: Dict[str, Any]) -> Dict[str, Any]:
     try:
         exported = pattern_to_bytes(pattern, fmt)
         reimported = load_pattern(exported, f"verify.{fmt}")
+        # Baseline: the untouched original through the SAME export/re-import,
+        # so format overhead (e.g. PES turning every trim into a trim-jump
+        # pair) is visible separately from what the fixes actually changed.
+        base_exported = pattern_to_bytes(_get_pattern(pid, version=1), fmt)
+        baseline = load_pattern(base_exported, f"verify.{fmt}")
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(422, f"Round-trip failed: {exc}") from exc
     ext = read_meta(pid)["upload_ext"]
@@ -251,6 +256,7 @@ def verify(pid: str, body: Dict[str, Any]) -> Dict[str, Any]:
         "applied_ops": applied,
         "working": _summary(pattern, ext, cfg),
         "reimported": _summary(reimported, f".{fmt}", cfg),
+        "baseline": _summary(baseline, f".{fmt}", cfg),
         "stitch_delta": (findings_mod._metrics.analyze(reimported, cfg)["total_stitches"]
                          - findings_mod._metrics.analyze(pattern, cfg)["total_stitches"]),
     }
