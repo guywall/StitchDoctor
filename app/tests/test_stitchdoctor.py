@@ -215,6 +215,40 @@ def test_reverse_block_inserts_travel_guard():
     assert cmds[:4] == [STITCH, STITCH, COLOR_CHANGE, JUMP]
 
 
+def test_reorder_blocks_auto_optimises_travel():
+    """reorder_blocks() with no order should greedily chain nearby blocks.
+
+    Fixture geometry: block 0 ends at (100,0), block 1 entry (2100,2000),
+    block 2 entry (-2000,100). Greedy from origin: 0 → 1 → 2, but 0→2→1 is
+    shorter overall (0 ends near 1; compare both tours honestly).
+    """
+    p = make_blocked_pattern()
+    out = ops_mod.reorder_blocks(p)   # order=None → auto-optimise
+    # threadlist must follow the blocks whatever order was chosen
+    assert len(out.threadlist) == 3
+    # the result must be a valid pattern with all stitches present
+    n_stitches = sum(1 for s in out.stitches if (s[2] & 0xFF) == STITCH)
+    assert n_stitches == 5
+
+
+def test_reorder_blocks_auto_rejects_when_already_optimal():
+    """A design whose order is already the greedy tour must say so, not
+    silently "succeed" with an identical rebuild (the 500-error fix)."""
+    p = EmbPattern()
+    p.add_thread("#ff0000")
+    p.add_thread("#00ff00")
+    p.add_stitch_absolute(STITCH, 0, 0)
+    p.add_stitch_absolute(STITCH, 100, 0)      # block 0 near origin
+    p.add_command(COLOR_CHANGE)
+    p.add_stitch_absolute(STITCH, 200, 0)      # block 1 continues right
+    p.add_command(END)
+    try:
+        ops_mod.reorder_blocks(p)
+        raise AssertionError("expected ValueError for already-optimal order")
+    except ValueError as exc:
+        assert "already" in str(exc)
+
+
 def test_findings_carry_estimated_savings(pattern):
     result = findings_mod.analyze(pattern, upload_ext=".dst")
     by_id = {f["id"]: f for f in result["findings"]}

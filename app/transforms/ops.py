@@ -299,14 +299,92 @@ def _assemble(blocks, separators, threads_src=None) -> EmbPattern:
     return out
 
 
-def reorder_blocks(pattern: EmbPattern, order: list) -> EmbPattern:
+def _block_entry_exit(block) -> tuple:
+    """(entry, exit) positions of a block: first and last positioned record."""
+    entry = exit_ = None
+    for s in block:
+        if s[0] or s[1] or (s[2] & COMMAND_MASK) in (STITCH, JUMP):
+            if entry is None:
+                entry = (s[0], s[1])
+            exit_ = (s[0], s[1])
+    return entry, exit_
+
+
+def _travel_optimised_order(blocks: list) -> list:
+    """Greedy nearest-neighbour block order minimising needle-up travel.
+
+    At each step we stand at the previous block's EXIT and pick the block
+    whose ENTRY is closest. Only reorders when the greedy tour actually
+    beats the original — a tiny saving is not worth a colour-order change.
+    """
+    scale = settings.UNITS_PER_MM
+    remaining = list(range(len(blocks)))
+
+    def centre(block) -> tuple:
+        pts = [(s[0], s[1]) for s in block if s[0] or s[1]]
+        if not pts:
+            return (0.0, 0.0)
+        return (sum(p[0] for p in pts) / len(pts) / scale,
+                sum(p[1] for p in pts) / len(pts) / scale)
+
+    def entry_mm(block) -> tuple:
+        e, _ = _block_entry_exit(block)
+        if e is None:
+            return centre(block)
+        return (e[0] / scale, e[1] / scale)
+
+    def exit_mm(block) -> tuple:
+        _, x = _block_entry_exit(block)
+        if x is None:
+            return centre(block)
+        return (x[0] / scale, x[1] / scale)
+
+    def tour_cost(order, entries, exits) -> float:
+        pos = (0.0, 0.0)  # needle starts at the origin
+        cost = 0.0
+        for bi in order:
+            e, x = entries[bi], exits[bi]
+            cost += math.dist(pos, e)
+            pos = x
+        return cost
+
+    entries = {i: entry_mm(b) for i, b in enumerate(blocks)}
+    exits = {i: exit_mm(b) for i, b in enumerate(blocks)}
+
+    order = []
+    pos = (0.0, 0.0)
+    while remaining:
+        best = min(remaining, key=lambda i: math.dist(pos, entries[i]))
+        order.append(best)
+        remaining.remove(best)
+        pos = exits[best]
+
+    # keep the original order when optimisation does not meaningfully help
+    original = list(range(len(blocks)))
+    if tour_cost(original, entries, exits) <= tour_cost(order, entries, exits) + 0.5:
+        return original
+    return order
+
+
+def reorder_blocks(pattern: EmbPattern, order: Optional[list] = None) -> EmbPattern:
     """Reorder colour blocks (0-based, new order as a permutation).
 
     Block k = everything from a color change/needle set to the next one.
+    With order=None, optimise automatically: greedy nearest-neighbour from
+    the needle's current position, re-evaluated from each block's *exit*
+    point (its last stitch), which is what the next jump actually leaves
+    from. Colour changes stay expensive (machine pauses), so a move is only
+    taken when it saves real travel.
     """
     blocks, separators = _blocks_with_separators(pattern)
     if not blocks:
         raise ValueError("pattern has no blocks to reorder")
+    if order is None:
+        order = _travel_optimised_order(blocks)
+        if order == list(range(len(blocks))):
+            raise ValueError(
+                "reordering would not reduce travel for this design — "
+                "the current order is already the shortest greedy tour")
     if sorted(order) != list(range(len(blocks))):
         raise ValueError(
             f"order must be a permutation of 0..{len(blocks) - 1}")
