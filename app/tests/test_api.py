@@ -22,6 +22,49 @@ def client(tmp_path, monkeypatch):
     return TestClient(fastapi_app)
 
 
+def test_blocks_and_compare_endpoints(client, tmp_path):
+    """Sew-order data + versioned compare for the studio UI."""
+    dst = _make_dst(tmp_path)
+    with open(dst, "rb") as fh:
+        res = client.post("/api/upload",
+                          files={"file": ("test.dst", fh, "application/octet-stream")})
+    pid = res.json()["pattern_id"]
+
+    blocks = client.get(f"/api/blocks/{pid}").json()
+    assert blocks["blocks"], "block summary missing"
+    assert all("stitches" in b and "travel_in_mm" in b for b in blocks["blocks"])
+    assert isinstance(blocks["threads"], list)  # DST may carry no thread records
+
+    cmp1 = client.get(f"/api/compare/{pid}").json()
+    assert "original" in cmp1 and "proposed" in cmp1
+    assert cmp1["original"]["geometry"]["stitch_total"] > 0
+
+    # apply an op, then compare against the explicit version
+    # (add_trims is pointless here: the DST encoder caps jumps at 12.1 mm,
+    # so no long jumps survive a round-trip — use the micro-stitch fix)
+    res = client.post(f"/api/rebuild/{pid}",
+                      json={"ops": [{"op": "remove_micro_stitches", "params": {}}]})
+    assert res.status_code == 200, res.text
+    cmp2 = client.get(f"/api/compare/{pid}?version=1").json()
+    assert cmp2["proposed"]["metrics"]["total_stitches"] == \
+        cmp1["proposed"]["metrics"]["total_stitches"]
+
+
+def test_upload_findings_carry_savings(client, tmp_path):
+    dst = _make_dst(tmp_path)
+    with open(dst, "rb") as fh:
+        data = client.post("/api/upload",
+                           files={"file": ("test.dst", fh, "application/octet-stream")}).json()
+    by_id = {f["id"]: f for f in data["findings"]}
+    micro = by_id["remove_micro_stitches"]
+    assert micro["estimated_savings"] is not None
+    assert micro["estimated_savings"]["stitches"] >= 1
+    assert by_id["flag_short_stitches"]["estimated_savings"] is None
+
+    config = client.get("/api/config").json()
+    assert config["machine"]["spm"] > 0
+
+
 def _make_dst(tmp_path):
     """Build a small DST file with micro-stitches and a long jump."""
     from pyembroidery import EmbPattern, STITCH, JUMP, COLOR_CHANGE, END

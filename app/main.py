@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import pyembroidery
+from pyembroidery import COMMAND_MASK, JUMP, STITCH
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -21,7 +22,7 @@ from . import settings
 from .analysis import findings as findings_mod
 from .llm import explain as llm_explain
 from .loader import load_pattern, pattern_to_bytes
-from .render.geometry import geometry
+from .render.geometry import DEFAULT_PALETTE, geometry
 from .store import (append_version, create_pattern, drop_versions_above,
                     latest_version, list_versions, load_version,
                     pattern_exists, prune_expired, read_meta, update_meta,
@@ -149,10 +150,73 @@ def get_geometry(pid: str, version: Optional[int] = None) -> Dict[str, Any]:
 
 @app.get("/api/config")
 def get_config() -> Dict[str, Any]:
-    """Analysis setting schema for the UI panel."""
+    """Analysis setting schema + sew-time model constants for the UI."""
     return {
         "defaults": settings.default_cfg(),
         "bounds": settings.ANALYSIS_SETTING_BOUNDS,
+        "machine": {
+            "spm": settings.MACHINE_SPM,
+            "trim_s": settings.TRIM_TIME_S,
+            "stop_s": settings.STOP_TIME_S,
+            "extra_stitch_s": settings.EXTRA_STITCH_TIME_S,
+        },
+    }
+
+
+@app.get("/api/blocks/{pid}")
+def get_blocks(pid: str, version: Optional[int] = None) -> Dict[str, Any]:
+    """Per-colour-block summary for the sew-order editor."""
+    pattern = _get_pattern(pid, version)
+    blocks, _seps = ops_mod._blocks_with_separators(pattern)
+    scale = settings.UNITS_PER_MM
+    out = []
+    pos = (0.0, 0.0)  # mm, in pyembroidery's Y-up space
+    seen_first = False
+    last_cmd = None
+    for bi, block in enumerate(blocks):
+        stitches = 0
+        travel_in = 0.0
+        xs: list = []
+        ys: list = []
+        first_start = None
+        for s in block:
+            cmd = s[2] & COMMAND_MASK
+            pt = (s[0] / scale, s[1] / scale)
+            if cmd == STITCH:
+                stitches += 1
+                if first_start is None:
+                    first_start = pt
+                if seen_first:
+                    travel_in += ((pt[0] - pos[0]) ** 2 + (pt[1] - pos[1]) ** 2) ** 0.5
+                xs.append(pt[0])
+                ys.append(pt[1])
+                pos = pt
+            elif cmd == JUMP:
+                if seen_first:
+                    travel_in += ((pt[0] - pos[0]) ** 2 + (pt[1] - pos[1]) ** 2) ** 0.5
+                pos = pt
+            if s[0] or s[1] or cmd in (STITCH, JUMP):
+                seen_first = True
+            last_cmd = cmd
+        bbox = None
+        if xs and ys:
+            bbox = {"min_x": round(min(xs), 1), "max_x": round(max(xs), 1),
+                    "min_y": round(min(ys), 1), "max_y": round(max(ys), 1)}
+        out.append({
+            "index": bi,
+            "stitches": stitches,
+            "travel_in_mm": round(travel_in, 1),
+            "bbox": bbox,
+            "start": list(first_start) if first_start else None,
+        })
+    threads = []
+    for t in pattern.threadlist:
+        color = getattr(t, "hex_color", None)
+        threads.append(color() if callable(color) else (color or "#808080"))
+    return {
+        "blocks": out,
+        "threads": threads,
+        "palette": DEFAULT_PALETTE,
     }
 
 
@@ -283,14 +347,15 @@ def _pattern_state(pid: str) -> Dict[str, Any]:
 
 
 @app.get("/api/compare/{pid}")
-def compare(pid: str) -> Dict[str, Any]:
-    """Original (v1) vs latest working version — in-memory only, never re-read
+def compare(pid: str, version: Optional[int] = None) -> Dict[str, Any]:
+    """Original (v1) vs a working version — in-memory only, never re-read
     exported machine files (plan v2 §1.4)."""
     if not pattern_exists(pid):
         raise HTTPException(404, "Unknown pattern id")
     ext = read_meta(pid)["upload_ext"]
     original = load_version(pid, 1)
-    latest = load_version(pid, latest_version(pid))
+    latest = load_version(pid, version if version is not None
+                          else latest_version(pid))
     cfg = read_meta(pid).get("cfg")
     return {
         "original": {"geometry": geometry(original),

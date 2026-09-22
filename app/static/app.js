@@ -1,5 +1,11 @@
-/* Stitch Doctor front-end: upload → findings → per-fix toggles → preview → verify → export. */
+/* Stitch Doctor front-end: studio shell wiring viewer, player, compare,
+   sew-order editor, findings, verify and export. ES modules, no build step. */
 "use strict";
+
+import { SDViewer } from "./viewer.js";
+import { SDPlayer } from "./player.js";
+import { SDCompare, renderImpact } from "./compare.js";
+import { SDBlocks } from "./blocks.js";
 
 const state = {
   patternId: null,
@@ -11,13 +17,54 @@ const state = {
   findings: [],
   cfg: null,
   configSchema: null,
+  machine: { spm: 700, trim_s: 3, stop_s: 0.6, extra_stitch_s: 0.15 },
   view: "thread",
-  activeOps: [],        // [{op, params}] — source of truth for fixes
-  highlight: null,      // finding id currently highlighted
+  activeOps: [],
+  highlight: null,
   busy: false,
+  v1Metrics: null,          // cached original metrics for impact deltas
+  originalGeometry: null,   // cached v1 geometry for the wipe compare
 };
 
 const $ = (id) => document.getElementById(id);
+
+// ---------------------------------------------------------------------------
+// Core instances
+
+const viewer = new SDViewer($("canvas"), $("tooltip"));
+const player = new SDPlayer(viewer, {
+  player: $("player"), playBtn: $("play-btn"), stopBtn: $("stop-btn"),
+  scrub: $("scrub"), speed: $("speed"), time: $("player-time"),
+  sound: $("sound"),
+}, state.machine);
+
+const compare = new SDCompare({
+  viewer,
+  els: {
+    bar: $("compare-bar"), slider: $("wipe-slider"),
+    modeBtn: $("compare-mode"), closeBtn: $("compare-close"),
+  },
+  fetchOriginalGeometry: async () => {
+    if (!state.originalGeometry) {
+      state.originalGeometry = await api(
+        `/api/geometry/${state.patternId}?version=1`);
+    }
+    return state.originalGeometry;
+  },
+});
+
+const blocks = new SDBlocks({
+  api,
+  getPid: () => state.patternId,
+  viewer,
+  els: {
+    panel: $("blocks-panel"), list: $("blocks-list"),
+    travel: $("blocks-travel"), refreshBtn: $("blocks-refresh"),
+  },
+  onChange: async () => {
+    await refreshAfterChange();
+  },
+});
 
 // ---------------------------------------------------------------------------
 // API helpers
@@ -53,6 +100,9 @@ $("upload-btn").addEventListener("click", async () => {
     const data = await api("/api/upload", { method: "POST", body: fd });
     state.patternId = data.pattern_id;
     state.cfg = data.cfg;
+    state.filename = data.filename;
+    state.v1Metrics = null;
+    state.originalGeometry = null;
     enterApp(data);
   } catch (err) {
     $("upload-error").textContent = err.message;
@@ -68,12 +118,17 @@ $("upload-btn").addEventListener("click", async () => {
 function enterApp(data) {
   $("upload-section").hidden = true;
   $("app-section").hidden = false;
+  $("report-section").hidden = true;
   state.activeOps = [];
   state.highlight = null;
+  compare.exit();
   updateState(data);
   renderSettingsPanel();
   loadConfigSchema();
   fetchGeometry();
+  player.show();
+  blocks.refresh();
+  cacheV1Metrics();
 }
 
 function updateState(data) {
@@ -83,12 +138,33 @@ function updateState(data) {
   state.findings = data.findings || [];
   state.jumps = data.jumps || [];
   if (data.cfg) state.cfg = data.cfg;
+  if (data.filename) state.filename = data.filename;
+  viewer.setProblemJumps(state.jumps.filter(
+    (j) => j.length_mm > ((state.cfg && state.cfg.long_jump_mm) || 12) && !j.after_trim));
   renderFindings();
   renderStats();
-  renderVerifyOut(null); // clear stale verify results
+  renderImpact($("impact"), state.v1Metrics, state.metrics);
+  renderVerifyOut(null);
+  setLegend();
   $("undo-btn").disabled = state.versions.length < 2;
   $("reset-btn").disabled =
     state.versions.length < 2 || state.versions[0] !== 1;
+}
+
+async function refreshAfterChange() {
+  const data = await api(`/api/pattern/${state.patternId}`);
+  updateState(data);
+  await fetchGeometry();
+  blocks.refresh(data.version);
+}
+
+async function cacheV1Metrics() {
+  if (!state.patternId) return;
+  try {
+    const data = await api(`/api/pattern/${state.patternId}?version=1`);
+    state.v1Metrics = data.metrics;
+    renderImpact($("impact"), state.v1Metrics, state.metrics);
+  } catch (_) { /* impact card just stays off */ }
 }
 
 async function fetchGeometry() {
@@ -96,7 +172,8 @@ async function fetchGeometry() {
     `/api/geometry/${state.patternId}?version=${state.version}`
   );
   state.geometry = geo;
-  drawCanvas();
+  viewer.setGeometry(geo);
+  player.setGeometry(geo);
 }
 
 // ---------------------------------------------------------------------------
@@ -106,6 +183,9 @@ async function loadConfigSchema() {
   if (state.configSchema) { renderSettingsPanel(); return; }
   try {
     state.configSchema = await api("/api/config");
+    if (state.configSchema.machine) {
+      Object.assign(state.machine, state.configSchema.machine);
+    }
   } catch (_) {
     state.configSchema = null;
   }
@@ -151,10 +231,11 @@ function renderSettingsPanel() {
 
 let settingTimer = null;
 function onSettingChanged() {
-  // read slider values into state.cfg
   document.querySelectorAll("#settings-panel input[type=range]").forEach((s) => {
     state.cfg[s.dataset.key] = parseFloat(s.value);
   });
+  viewer.setProblemJumps(state.jumps.filter(
+    (j) => j.length_mm > state.cfg.long_jump_mm && !j.after_trim));
   if ($("auto-analyse").checked) {
     clearTimeout(settingTimer);
     settingTimer = setTimeout(reanalyse, 350);
@@ -176,7 +257,6 @@ async function reanalyse() {
     const qs = "cfg=" + encodeURIComponent(JSON.stringify(state.cfg));
     const data = await api(`/api/pattern/${state.patternId}?${qs}`);
     updateState(data);
-    // findings changed — active ops may no longer make sense; keep as-is
     drawCanvas();
   } catch (err) {
     $("upload-error").textContent = err.message;
@@ -189,6 +269,8 @@ async function reanalyse() {
 function renderFindings() {
   const box = $("findings");
   box.innerHTML = "";
+  $("findings-count").textContent =
+    state.findings.length ? String(state.findings.length) : "clean";
   if (!state.findings.length) {
     box.innerHTML =
       '<p class="finding"><em>No issues found — this design looks clean.</em></p>';
@@ -205,12 +287,16 @@ function renderFindings() {
     const action = f.op
       ? `<label><input type="checkbox" data-op="${f.op}" ${opActive(f.op) ? "checked" : ""}> Apply fix</label>`
       : `<p class="advisory">Advisory — no automatic fix.</p>`;
+    const savings = f.estimated_savings && f.estimated_savings.label
+      ? `<span class="savings-badge">⚡ ${f.estimated_savings.label}</span>`
+      : "";
     div.innerHTML = `
       <span class="sev ${f.severity}">${f.severity}</span>
       <h3>${f.title}</h3>
       <p>${f.detail}</p>
       ${caveat}
       <p><em>Impact: ${f.estimated_impact}</em></p>
+      ${savings}
       ${action}
       ${hasLocations ? '<button class="locate-btn">Show on canvas</button>' : ""}
       <button class="explain-btn" data-finding="${f.id}">Why?</button>
@@ -225,11 +311,8 @@ function renderFindings() {
     const checkbox = div.querySelector('input[type="checkbox"]');
     if (checkbox) {
       checkbox.addEventListener("change", (e) => {
-        if (e.target.checked) {
-          addOp(e.target.dataset.op, div);
-        } else {
-          removeOp(e.target.dataset.op, div);
-        }
+        if (e.target.checked) addOp(e.target.dataset.op, div);
+        else removeOp(e.target.dataset.op, div);
       });
     }
   }
@@ -261,8 +344,8 @@ async function rebuild(kind, op, card) {
     });
     updateState(data);
     await fetchGeometry();
+    blocks.refresh(data.version);
   } catch (err) {
-    // roll the checkbox back; keep the ops list consistent
     if (kind === "add") {
       state.activeOps = state.activeOps.filter((o) => o.op !== op);
     } else {
@@ -282,8 +365,6 @@ function setError(card, message) {
   if (slot) slot.textContent = message;
 }
 
-// Undo/reset drop ALL selected ops (server rebuilds from v1 on next rebuild;
-// here we also clear the toggle states to match).
 $("undo-btn").addEventListener("click", async () => {
   try {
     const data = await api(`/api/undo/${state.patternId}`, { method: "POST" });
@@ -291,6 +372,7 @@ $("undo-btn").addEventListener("click", async () => {
     renderFindings();
     updateState(data);
     await fetchGeometry();
+    blocks.refresh(data.version);
   } catch (err) {
     $("upload-error").textContent = err.message;
   }
@@ -303,6 +385,7 @@ $("reset-btn").addEventListener("click", async () => {
     renderFindings();
     updateState(data);
     await fetchGeometry();
+    blocks.refresh(data.version);
   } catch (err) {
     $("upload-error").textContent = err.message;
   }
@@ -329,266 +412,45 @@ async function explainFinding(findingId) {
 }
 
 // ---------------------------------------------------------------------------
-// Canvas rendering
+// Canvas toolbar
 
 document.querySelectorAll('input[name="view"]').forEach((r) =>
   r.addEventListener("change", (e) => {
     state.view = e.target.value;
-    drawCanvas();
+    viewer.setView(state.view);
+    setLegend();
   })
 );
 
-$("refresh-preview").addEventListener("click", drawCanvas);
+$("fabric-select").addEventListener("change", (e) => {
+  viewer.setFabric(e.target.value);
+});
+$("zoom-in").addEventListener("click", () => viewer.zoomIn());
+$("zoom-out").addEventListener("click", () => viewer.zoomOut());
+$("zoom-fit").addEventListener("click", () => viewer.fit());
+$("compare-btn").addEventListener("click", () => compare.enter());
 
-// click a finding's "Show on canvas" → zoom to its locations
 function toggleHighlight(findingId, card) {
   if (state.highlight === findingId) {
     state.highlight = null;
+    viewer.setHighlight(null);
     if (card) card.classList.remove("locating");
   } else {
     state.highlight = findingId;
+    viewer.setHighlight(findingById(findingId));
     document.querySelectorAll(".finding").forEach((el) => el.classList.remove("locating"));
     if (card) card.classList.add("locating");
   }
-  drawCanvas();
 }
 
 function findingById(id) {
   return state.findings.find((f) => f.id === id) || null;
 }
 
-function drawCanvas() {
-  const canvas = $("canvas");
-  const ctx = canvas.getContext("2d");
-  const geo = state.geometry;
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  setLegend();
-  if (!geo || geo.empty || !geo.segments.length) {
-    ctx.fillStyle = "#999";
-    ctx.font = "16px system-ui";
-    ctx.fillText("No stitch data", 20, 30);
-    return;
-  }
-
-  const hl = state.highlight ? findingById(state.highlight) : null;
-
-  // viewport: whole design, or zoomed to the highlighted finding
-  let view = { minX: geo.extents.min_x, maxX: geo.extents.max_x,
-               minY: geo.extents.min_y, maxY: geo.extents.max_y };
-  if (hl && hl.locations.length) {
-    const b = locationBounds(hl.locations);
-    if (b) {
-      const pad = Math.max((b.maxX - b.minX), (b.maxY - b.minY)) * 0.6 + 5;
-      view = { minX: b.minX - pad, maxX: b.maxX + pad,
-               minY: b.minY - pad, maxY: b.maxY + pad };
-    }
-  }
-
-  const pad = 20;
-  const vw = Math.max(view.maxX - view.minX, 1);
-  const vh = Math.max(view.maxY - view.minY, 1);
-  const scale = Math.min(
-    (canvas.width - pad * 2) / vw,
-    (canvas.height - pad * 2) / vh
-  );
-  const ox = pad - view.minX * scale;
-  const oy = canvas.height - pad + view.minY * scale;
-  const toX = (x) => ox + x * scale;
-  const toY = (y) => oy - y * scale;
-
-  const palette = geo.palette || ["#333"];
-  const threads = geo.threads || [];
-  const colorFor = (block) =>
-    threads[block] || palette[block % palette.length] || "#333";
-
-  const showPaths = state.view !== "thread";
-  const showJumps = state.view === "paths" || state.view === "problems";
-
-  // stitch segments
-  for (const seg of geo.segments) {
-    if (seg.type === "jump") {
-      if (!showJumps) continue;
-      ctx.strokeStyle = "rgba(160,160,160,0.7)";
-      ctx.setLineDash([4, 4]);
-      ctx.lineWidth = 1;
-    } else {
-      ctx.strokeStyle = state.view === "thread" ? colorFor(seg.color) : "#333";
-      ctx.setLineDash([]);
-      ctx.lineWidth = state.view === "thread" ? 1.4 : 1;
-    }
-    ctx.beginPath();
-    const pts = seg.points;
-    // cheap viewport culling for big designs
-    if (pts.length > 2) {
-      let visible = false;
-      for (const [px, py] of pts) {
-        const sx = toX(px), sy = toY(py);
-        if (sx > -50 && sx < canvas.width + 50 && sy > -50 && sy < canvas.height + 50) {
-          visible = true;
-          break;
-        }
-      }
-      if (!visible) continue;
-    }
-    ctx.moveTo(toX(pts[0][0]), toY(pts[0][1]));
-    for (let i = 1; i < pts.length; i++) {
-      ctx.lineTo(toX(pts[i][0]), toY(pts[i][1]));
-    }
-    ctx.stroke();
-  }
-  ctx.setLineDash([]);
-
-  // trim markers
-  if (showPaths) {
-    for (const t of geo.trims) {
-      const sx = toX(t.x), sy = toY(t.y);
-      if (sx < -10 || sx > canvas.width + 10 || sy < -10 || sy > canvas.height + 10) continue;
-      ctx.strokeStyle = "#b3424a";
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(sx - 4, sy - 4);
-      ctx.lineTo(sx + 4, sy + 4);
-      ctx.moveTo(sx + 4, sy - 4);
-      ctx.lineTo(sx - 4, sy + 4);
-      ctx.stroke();
-    }
-  }
-
-  // density heat overlay: always visible in every view (the "obvious" requirement)
-  drawDensityOverlay(ctx, toX, toY);
-
-  // problems overlay: short/long stitch endpoints + untrimmed long jumps
-  if (state.view === "problems" || hl) {
-    drawProblemMarkers(ctx, toX, toY, hl);
-  }
-
-  // highlight box around zoomed region
-  if (hl && hl.locations.length) {
-    ctx.strokeStyle = "#b3424a";
-    ctx.lineWidth = 2;
-    ctx.setLineDash([6, 4]);
-    ctx.strokeRect(6, 6, canvas.width - 12, canvas.height - 12);
-    ctx.setLineDash([]);
-    ctx.fillStyle = "#b3424a";
-    ctx.font = "bold 13px system-ui";
-    ctx.fillText("Highlighted: " + hl.title, 14, 22);
-  }
-
-  // start point marker
-  if (geo.segments.length) {
-    const first = geo.segments[0].points[0];
-    const sx = toX(first[0]), sy = toY(first[1]);
-    if (sx > 0 && sx < canvas.width && sy > 0 && sy < canvas.height) {
-      ctx.fillStyle = "#3a7d44";
-      ctx.beginPath();
-      ctx.arc(sx, sy, 5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = "#fff";
-      ctx.font = "bold 8px system-ui";
-      ctx.fillText("S", sx - 2.5, sy + 3);
-    }
-  }
-}
-
-function locationBounds(locations) {
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  for (const loc of locations) {
-    let pts = [];
-    if (loc.type === "jump") pts = [[loc.from[0], loc.from[1]], [loc.to[0], loc.to[1]]];
-    else if (loc.type === "stitch") pts = [[loc.from[0], loc.from[1]], [loc.to[0], loc.to[1]]];
-    else if (loc.type === "density") pts = [[loc.x, loc.y]];
-    else if (loc.type === "run") pts = [[loc.x, loc.y]];
-    for (const [x, y] of pts) {
-      if (x < minX) minX = x;
-      if (x > maxX) maxX = x;
-      if (y < minY) minY = y;
-      if (y > maxY) maxY = y;
-    }
-  }
-  if (minX === Infinity) return null;
-  return { minX, maxX, minY, maxY };
-}
-
-// density heat cells — drawn whenever hotspots exist, in every view
-function drawDensityOverlay(ctx, toX, toY) {
-  const hotspots = state.metrics.density_hotspots || [];
-  if (!hotspots.length) return;
-  const cell = (state.cfg && state.cfg.density_cell_mm) || 5;
-  for (const h of hotspots) {
-    const half = cell / 2;
-    const x0 = toX(h.x_mm - half), y0 = toY(h.y_mm + half);
-    const w = (cell) * (toX(h.x_mm + half) - toX(h.x_mm - half));
-    const h2 = (cell) * (toY(h.y_mm - half) - toY(h.y_mm + half));
-    const worst = h.stitches_per_mm2 / ((state.cfg && state.cfg.density_per_mm2) || 12);
-    const alpha = Math.min(0.15 + 0.45 * (worst - 1), 0.75);
-    ctx.fillStyle = `rgba(179, 42, 42, ${alpha.toFixed(2)})`;
-    ctx.fillRect(x0, y0, w, Math.abs(h2));
-    ctx.strokeStyle = "rgba(179, 42, 42, 0.9)";
-    ctx.lineWidth = 1.5;
-    ctx.strokeRect(x0, y0, w, Math.abs(h2));
-    // density label
-    ctx.fillStyle = "rgba(120, 10, 10, 0.95)";
-    ctx.font = "bold 11px system-ui";
-    ctx.fillText(`${h.stitches_per_mm2}/mm²`, x0, y0 - 3);
-  }
-}
-
-// markers for stitch/jump problems (+ highlighted finding emphasis)
-function drawProblemMarkers(ctx, toX, toY, hl) {
-  const drawJumpSet = (jumps, color, width) => {
-    ctx.strokeStyle = color;
-    ctx.lineWidth = width;
-    for (const j of jumps) {
-      ctx.beginPath();
-      ctx.moveTo(toX(j.from[0]), toY(j.from[1]));
-      ctx.lineTo(toX(j.to[0]), toY(j.to[1]));
-      ctx.stroke();
-    }
-  };
-  const longJumps = state.jumps.filter(
-    (j) => j.length_mm > ((state.cfg && state.cfg.long_jump_mm) || 12)
-  );
-  const untrimmed = longJumps.filter((j) => !j.after_trim);
-  if (state.view === "problems") {
-    drawJumpSet(untrimmed, "rgba(255,0,0,0.8)", 2.5);
-    if (longJumps.length > untrimmed.length) {
-      drawJumpSet(longJumps.filter((j) => j.after_trim), "rgba(255,140,0,0.55)", 2);
-    }
-  }
-  if (hl) {
-    const locJumps = hl.locations.filter((l) => l.type === "jump");
-    drawJumpSet(locJumps.map((l) => ({ from: l.from, to: l.to })), "#00b3ff", 3);
-  }
-
-  // short/long stitch locations as dots (advisory + splittable findings)
-  for (const f of state.findings) {
-    const locs = (f.locations || []).filter((l) => l.type === "stitch");
-    if (!locs.length) continue;
-    const isHl = state.highlight === f.id;
-    if (state.view !== "problems" && !isHl) continue;
-    ctx.fillStyle = f.id === "remove_micro_stitches"
-      ? (isHl ? "#b3424a" : "rgba(179,66,74,0.45)")
-      : (isHl ? "#e08a00" : "rgba(224,138,0,0.4)");
-    const r = isHl ? 4 : 2.5;
-    for (const l of locs) {
-      const sx = toX(l.to[0]), sy = toY(l.to[1]);
-      if (sx < -10 || sx > canvas.width + 10 || sy < -10 || sy > canvas.height + 10) continue;
-      ctx.beginPath();
-      ctx.arc(sx, sy, r, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-}
-
 function setLegend() {
   const legend = $("legend");
-  const hotspots = state.metrics.density_hotspots || [];
   const parts = [];
-  if (hotspots.length) parts.push("⬛ density ≥ " + ((state.cfg && state.cfg.density_per_mm2) || 12) + "/mm²");
-  if (state.view !== "thread") parts.push("✂ trims");
-  if (state.view === "paths" || state.view === "problems") parts.push("┄ jumps");
+  if (state.view !== "thread") parts.push("✂ trims · ┄ jumps");
   if (state.view === "problems") parts.push("▬ untrimmed long jump");
   if (!parts.length) { legend.hidden = true; legend.textContent = ""; return; }
   legend.hidden = false;
@@ -599,7 +461,7 @@ function setLegend() {
 // Verify (round-trip what-if)
 
 $("verify-format").innerHTML =
-  (["pes", "dst", "jef", "vp3", "exp", "u01", "pec", "xxx"] )
+  (["pes", "dst", "jef", "vp3", "exp", "u01", "pec", "xxx"])
     .map((f) => `<option value="${f}">${f.toUpperCase()}</option>`).join("");
 
 $("verify-btn").addEventListener("click", async () => {
@@ -671,3 +533,131 @@ $("export-btn").addEventListener("click", () => {
   const fmt = $("export-format").value;
   window.location = `/api/export/${state.patternId}?format=${fmt}`;
 });
+
+// ---------------------------------------------------------------------------
+// Printable report
+
+$("report-btn").addEventListener("click", buildReport);
+$("report-print").addEventListener("click", () => window.print());
+$("report-close").addEventListener("click", () => {
+  $("report-section").hidden = true;
+  $("app-section").hidden = false;
+});
+
+async function buildReport() {
+  let orig = state.originalGeometry;
+  let origMetrics = state.v1Metrics;
+  if (!orig || !origMetrics) {
+    const [g, p] = await Promise.all([
+      api(`/api/geometry/${state.patternId}?version=1`),
+      api(`/api/pattern/${state.patternId}?version=1`),
+    ]);
+    orig = g; origMetrics = p.metrics;
+    state.originalGeometry = orig; state.v1Metrics = origMetrics;
+  }
+  const m = state.metrics;
+  const name = (state.filename || "design");
+  const rows = [
+    ["Stitches", (origMetrics.total_stitches || 0).toLocaleString(),
+     (m.total_stitches || 0).toLocaleString()],
+    ["Colours", String((origMetrics.color_changes || 0) + 1),
+     String((m.color_changes || 0) + 1)],
+    ["Jumps", String(origMetrics.jump_count || 0), String(m.jump_count || 0)],
+    ["Jump travel", `${origMetrics.jump_travel_mm || 0} mm`, `${m.jump_travel_mm || 0} mm`],
+    ["Trims", String(origMetrics.trims || 0), String(m.trims || 0)],
+    ["Max stitch", `${origMetrics.max_stitch_mm || 0} mm`, `${m.max_stitch_mm || 0} mm`],
+    ["Size", `${origMetrics.extents?.width_mm || 0} × ${origMetrics.extents?.height_mm || 0} mm`,
+     `${m.extents?.width_mm || 0} × ${m.extents?.height_mm || 0} mm`],
+  ].map(([k, a, b]) => `<tr><th>${k}</th><td>${a}</td><td>${b}</td></tr>`).join("");
+
+  const findingsHtml = state.findings.length
+    ? state.findings.map((f) => `
+        <div class="finding">
+          <span class="sev ${f.severity}">${f.severity}</span>
+          <h3>${f.title}</h3>
+          <p>${f.detail}</p>
+          ${f.estimated_savings && f.estimated_savings.label
+            ? `<span class="savings-badge">⚡ ${f.estimated_savings.label}</span>` : ""}
+        </div>`).join("")
+    : "<p><em>No issues found — this design looks clean.</em></p>";
+
+  $("report-body").innerHTML = `
+    <h2>Stitch Doctor report</h2>
+    <p class="report-meta">${escapeHtml(name)} · ${new Date().toLocaleString()} ·
+       version ${state.version} of ${state.versions.length}</p>
+    <div class="report-grid">
+      <div><h3>Original</h3><canvas id="report-orig" width="640" height="480"></canvas></div>
+      <div><h3>Proposed</h3><canvas id="report-prop" width="640" height="480"></canvas></div>
+    </div>
+    <table>
+      <tr><th></th><th>Original</th><th>Proposed</th></tr>
+      ${rows}
+    </table>
+    <h2>Findings</h2>
+    ${findingsHtml}
+  `;
+  drawReportCanvas($("report-orig"), orig);
+  drawReportCanvas($("report-prop"), state.geometry);
+  $("app-section").hidden = true;
+  $("report-section").hidden = false;
+}
+
+function drawReportCanvas(canvasEl, geo) {
+  if (!geo || geo.empty || !geo.segments.length) return;
+  const ctx = canvasEl.getContext("2d");
+  const W = canvasEl.width, H = canvasEl.height;
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, W, H);
+  const pad = 14;
+  const scale = Math.min((W - pad * 2) / geo.extents.width_mm,
+                         (H - pad * 2) / geo.extents.height_mm);
+  const ox = (W - geo.extents.width_mm * scale) / 2 - geo.extents.min_x * scale;
+  const oy = H - (H - geo.extents.height_mm * scale) / 2 + geo.extents.min_y * scale;
+  ctx.save();
+  ctx.translate(ox, oy);
+  ctx.scale(scale, -scale);
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  const threads = geo.threads || [];
+  const width = 0.4 / scale * Math.max(1, Math.min(3, scale / 3));
+  for (const seg of geo.segments) {
+    if (seg.type === "jump") continue;
+    const pts = seg.points;
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.strokeStyle = threads[seg.color] || "#333";
+    ctx.lineWidth = width;
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// expose internals for debugging / QA tooling
+window.__sdMachine = state.machine;
+window.__sdViewer = viewer;
+window.__sdState = state;
+
+function drawCanvas() { /* the viewer schedules its own redraws */ }
+
+// ---------------------------------------------------------------------------
+// Boot: ?pattern=<id> reopens an existing session (reload / shareable link)
+
+(async function boot() {
+  const pid = new URLSearchParams(location.search).get("pattern");
+  if (!pid) return;
+  try {
+    const data = await api(`/api/pattern/${pid}`);
+    state.patternId = pid;
+    state.cfg = data.cfg;
+    state.filename = data.filename;
+    enterApp(data);
+  } catch (err) {
+    $("upload-error").textContent = "Could not reopen pattern: " + err.message;
+  }
+})();

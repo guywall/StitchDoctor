@@ -241,12 +241,15 @@ def remove_isolated_stitches(pattern: EmbPattern,
     return out
 
 
-def reorder_blocks(pattern: EmbPattern, order: list) -> EmbPattern:
-    """Reorder colour blocks (0-based, new order as a permutation).
+def _blocks_with_separators(pattern: EmbPattern):
+    """Split the pattern into colour blocks + the separators between them.
 
-    Block k = everything from a color change/needle set to the next one.
+    Returns (blocks, separators) where blocks[i] is a list of [x, y, cmd]
+    records (stitches, jumps, trims, stops — anything between two colour
+    changes) and separators[i] is the COLOR_CHANGE/NEEDLE_SET record that
+    ends block i. len(separators) == len(blocks) - 1.
     """
-    blocks = []  # list of lists of stitches
+    blocks = []
     separators = []
     current = []
     for s in pattern.stitches:
@@ -254,15 +257,54 @@ def reorder_blocks(pattern: EmbPattern, order: list) -> EmbPattern:
         if cmd == END:
             break
         if cmd in (COLOR_CHANGE, NEEDLE_SET):
-            if current:
-                blocks.append(current)
+            blocks.append(current)
             current = []
-            separators.append(cmd)
+            separators.append([s[0], s[1], cmd])
         else:
             current.append([s[0], s[1], cmd])
-    if current:
-        blocks.append(current)
+    blocks.append(current)
+    # a trailing colour change with no stitches after it is not a block
+    if blocks and not blocks[-1] and separators:
+        blocks.pop()
+        separators.pop()
+    return blocks, separators
 
+
+def _assemble(blocks, separators, threads_src=None) -> EmbPattern:
+    """Rebuild a pattern from blocks + separators, preserving threadlist.
+
+    Travel guard: when a block now starts far from where the needle sits
+    (block moved/reversed), insert a JUMP to the block's first stitch so the
+    connection is needle-up travel rather than a stray long stitch.
+    """
+    out = EmbPattern()
+    guard = settings.LONG_JUMP_MM * settings.UNITS_PER_MM
+    pos = None
+    for i, block in enumerate(blocks):
+        if i > 0:
+            sep = separators[i - 1]
+            out.add_stitch_absolute(sep[2], sep[0], sep[1])
+        for j, s in enumerate(block):
+            cmd = s[2] & COMMAND_MASK
+            if (j == 0 and cmd == STITCH and pos is not None
+                    and math.hypot(s[0] - pos[0],
+                                   s[1] - pos[1]) > guard):
+                out.add_stitch_absolute(JUMP, s[0], s[1])
+            out.add_stitch_absolute(cmd, s[0], s[1])
+            if cmd != TRIM and cmd != COLOR_CHANGE:
+                pos = (s[0], s[1]) if (s[0] or s[1]) else pos
+    out.add_command(END)
+    if threads_src is not None:
+        _copy_threads(threads_src, out)
+    return out
+
+
+def reorder_blocks(pattern: EmbPattern, order: list) -> EmbPattern:
+    """Reorder colour blocks (0-based, new order as a permutation).
+
+    Block k = everything from a color change/needle set to the next one.
+    """
+    blocks, separators = _blocks_with_separators(pattern)
     if not blocks:
         raise ValueError("pattern has no blocks to reorder")
     if sorted(order) != list(range(len(blocks))):
@@ -286,10 +328,121 @@ def reorder_blocks(pattern: EmbPattern, order: list) -> EmbPattern:
     return out
 
 
+def _validate_block_index(blocks, index, action: str) -> int:
+    if not blocks:
+        raise ValueError("pattern has no colour blocks")
+    try:
+        index = int(index)
+    except (TypeError, ValueError):
+        raise ValueError("block index must be an integer")
+    if not 0 <= index < len(blocks):
+        raise ValueError(
+            f"cannot {action} block {index}: pattern has {len(blocks)} blocks")
+    return index
+
+
+def move_block(pattern: EmbPattern, index: int = 0, to: int = 0) -> EmbPattern:
+    """Move one colour block to a new position in the sew order.
+
+    The threadlist follows the block, so previews and exports keep the
+    right colours per block.
+    """
+    blocks, separators = _blocks_with_separators(pattern)
+    index = _validate_block_index(blocks, index, "move")
+    n = len(blocks)
+    try:
+        to = int(to)
+    except (TypeError, ValueError):
+        raise ValueError("target position 'to' must be an integer")
+    if not 0 <= to < n:
+        raise ValueError(f"target position {to} out of range (0..{n - 1})")
+    if to == index:
+        return pattern
+    block = blocks.pop(index)
+    blocks.insert(to, block)
+    out = _assemble(blocks, separators, threads_src=pattern)
+    out.threadlist = [
+        pattern.threadlist[i] for i in _origin_indices(len(blocks), index, to)
+        if i < len(pattern.threadlist)]
+    return out
+
+
+def _origin_indices(n: int, src: int, dst: int) -> list:
+    """Original block indices for the order after moving src to dst."""
+    order = list(range(n + 1))  # before the pop
+    order.pop(src)
+    order.insert(dst, src)
+    return order
+
+
+def reverse_block(pattern: EmbPattern, index: int = 0) -> EmbPattern:
+    """Reverse the stitch direction within one colour block.
+
+    Classic digitising fix: sew a fill/satin the other way so the last
+    stitch tucks the previous one, or to shorten the jump out of the block.
+    Stitches, jumps and trims inside the block all reverse together.
+    """
+    blocks, separators = _blocks_with_separators(pattern)
+    index = _validate_block_index(blocks, index, "reverse")
+    blocks[index] = list(reversed(blocks[index]))
+    return _assemble(blocks, separators, threads_src=pattern)
+
+
+def delete_block(pattern: EmbPattern, index: int = 0) -> EmbPattern:
+    """Delete a colour block entirely (e.g. a stray artefact run).
+
+    The block's separator goes with it; the threadlist entry is dropped so
+    colours stay aligned with blocks.
+    """
+    blocks, separators = _blocks_with_separators(pattern)
+    index = _validate_block_index(blocks, index, "delete")
+    blocks.pop(index)
+    if separators and index - 1 < len(separators):
+        separators.pop(index - 1 if index > 0 else 0)
+    if not blocks:
+        raise ValueError("cannot delete the only colour block")
+    out = _assemble(blocks, separators, threads_src=pattern)
+    out.threadlist = [t for i, t in enumerate(pattern.threadlist)
+                      if i != index and i < len(pattern.threadlist)]
+    return out
+
+
+def merge_blocks(pattern: EmbPattern, index: int = 0, with_index: int = 1) -> EmbPattern:
+    """Merge two adjacent colour blocks into one (keeps the first's colour).
+
+    Useful when an auto-digitiser split one logical shape across two blocks
+    with the same or nearly-identical thread.
+    """
+    blocks, separators = _blocks_with_separators(pattern)
+    index = _validate_block_index(blocks, index, "merge")
+    try:
+        with_index = int(with_index)
+    except (TypeError, ValueError):
+        raise ValueError("'with_index' must be an integer")
+    if not 0 <= with_index < len(blocks):
+        raise ValueError(
+            f"cannot merge with block {with_index}: pattern has {len(blocks)} blocks")
+    if abs(with_index - index) != 1:
+        raise ValueError("merge_blocks requires adjacent block indices")
+    lo, hi = sorted((index, with_index))
+    blocks[lo] = blocks[lo] + blocks[hi]
+    blocks.pop(hi)
+    if hi - 1 < len(separators):
+        separators.pop(hi - 1)
+    out = _assemble(blocks, separators, threads_src=pattern)
+    out.threadlist = [t for i, t in enumerate(pattern.threadlist)
+                      if i != hi and i < len(pattern.threadlist)]
+    return out
+
+
 OPS: OpsMap = {
     "remove_micro_stitches": remove_micro_stitches,
     "add_trims": add_trims,
     "split_long_stitches": split_long_stitches,
     "remove_isolated_stitches": remove_isolated_stitches,
     "reorder_blocks": reorder_blocks,
+    "move_block": move_block,
+    "reverse_block": reverse_block,
+    "delete_block": delete_block,
+    "merge_blocks": merge_blocks,
 }

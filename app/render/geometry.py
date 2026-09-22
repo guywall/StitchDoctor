@@ -30,36 +30,51 @@ _POSITIONLESS = {TRIM, COLOR_CHANGE, NEEDLE_SET}
 
 
 def geometry(pattern: EmbPattern) -> Dict[str, Any]:
-    """Full canvas geometry: segments, colour blocks, extents, trims."""
+    """Full canvas geometry: segments, colour blocks, extents, trims.
+
+    Every segment and trim also carries its position in the stitch sequence
+    (stitch_start/stitch_end/stitch_at plus the top-level stitch_total) so the
+    client can animate the design sewing itself and estimate sew time.
+    """
     segments: List[Dict[str, Any]] = []   # stitch runs and jumps
     trims: List[Dict[str, Any]] = []      # trim marker positions
     blocks: List[Dict[str, Any]] = []     # colour block metadata
 
-    current_block = -1
+    current_block = 0          # first block uses threadlist[0]
     color_changes_seen = 0
     pos = (0.0, 0.0)
     scale = settings.UNITS_PER_MM
+    stitch_total = 0
+    run_start_idx = -1
+    last_stitch_idx = -1
 
     current_run: List[List[float]] = []
 
     def _flush_run() -> None:
-        nonlocal current_run
+        nonlocal current_run, run_start_idx
         if len(current_run) > 1:
             segments.append({
                 "type": "stitch",
                 "points": current_run,
                 "color": current_block,
+                "stitch_start": run_start_idx,
+                "stitch_end": last_stitch_idx,
             })
         current_run = []
+        run_start_idx = -1
 
     def _mm(v: float) -> float:
         return round(v / scale, 2)
 
-    for s in pattern.stitches:
+    for idx, s in enumerate(pattern.stitches):
         cmd = s[2] & COMMAND_MASK
         if cmd == END:
             break
         if cmd == STITCH:
+            if not current_run:
+                run_start_idx = idx
+            last_stitch_idx = idx
+            stitch_total += 1
             pt = (_mm(s[0]), _mm(s[1]))
             current_run.append([pt[0], pt[1]])
             pos = pt
@@ -70,11 +85,12 @@ def geometry(pattern: EmbPattern) -> Dict[str, Any]:
                 "type": "jump",
                 "points": [[pos[0], pos[1]], [nxt[0], nxt[1]]],
                 "color": current_block,
+                "stitch_at": stitch_total,
             })
             pos = nxt
         elif cmd == TRIM:
             _flush_run()
-            trims.append({"x": pos[0], "y": pos[1]})
+            trims.append({"x": pos[0], "y": pos[1], "stitch_at": stitch_total})
         elif cmd in (COLOR_CHANGE, NEEDLE_SET):
             _flush_run()
             if cmd == COLOR_CHANGE or cmd == NEEDLE_SET:
@@ -87,7 +103,7 @@ def geometry(pattern: EmbPattern) -> Dict[str, Any]:
 
     if not segments and not trims:
         return {"empty": True, "segments": [], "trims": [],
-                "blocks": [], "extents": None}
+                "blocks": [], "extents": None, "stitch_total": 0}
 
     all_pts = [p for seg in segments for p in seg["points"]]
     xs = [p[0] for p in all_pts]
@@ -113,4 +129,5 @@ def geometry(pattern: EmbPattern) -> Dict[str, Any]:
         "extents": extents,
         "threads": threads,
         "palette": DEFAULT_PALETTE,
+        "stitch_total": stitch_total,
     }

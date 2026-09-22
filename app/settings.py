@@ -45,6 +45,12 @@ ISOLATED_RUN_MM = 4.0          # single stitch run far from others
 # Density caveat: density is measured against an assumed hoop area.
 ASSUMED_HOOP_MM = 100.0
 
+# --- Sew-time estimation (nominal machine; used for savings + the player) ----
+MACHINE_SPM = 700          # nominal stitches per minute
+TRIM_TIME_S = 3.0          # seconds per trim (needle-up, cut, restart)
+STOP_TIME_S = 0.6          # seconds per machine stop
+EXTRA_STITCH_TIME_S = 0.15  # per stitch added by split_long_stitches
+
 # User-tunable analysis settings (exposed in the UI; clamped to these bounds).
 ANALYSIS_SETTING_BOUNDS = {
     "micro_mm": (0.05, 2.0),

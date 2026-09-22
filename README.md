@@ -5,22 +5,38 @@ diagnosis → visual report → selectable reversible fixes → live preview →
 export. Built on [pyembroidery](https://github.com/EmbroidePy/pyembroidery),
 served by FastAPI, deployed as a Docker container on Plesk.
 
+## The studio
+
+The preview is a **virtual stitch-out**: zoom/pan/hover canvas, real thread
+colours with satin sheen, fabric backgrounds, and a player that animates the
+design sewing itself with a scrub timeline and sew-time estimates (machine
+speed configurable in `app/settings.py`). The **Compare** button wipes between
+original and fixed versions; every fix shows an impact card (stitches, travel,
+sew time). The **Sew order** panel drag-reorders colour blocks (reverse,
+merge, delete too) — each change is a new reversible version.
+
+`?pattern=<id>` reopens a previous session (reload-safe, shareable).
+
 ## The flow
 
 1. **Upload** — PES, DST, JEF, VP3, EXP and ~40 more formats. The original
-   file is stored untouched.
+   file is stored untouched. PES/PEC STOP-based colour encoding is normalised
+   to real colour blocks on import.
 2. **Analysis** — fixed diagnostic protocol every time: stitch count, colour
    blocks, stitch-length distribution, micro/short/long stitches, jumps,
-   jump travel, trims, density hotspots, isolated stitches.
+   jump travel, trims, density hotspots, isolated stitches. Actionable
+   findings carry an `estimated_savings` label (stitches/travel/minutes).
 3. **Report** — findings as plain-language cards, each with a severity,
    honesty caveats, and canvas locations for highlighting.
 4. **Fixes** — tick a finding to apply its operation. Every fix produces a
-   new persisted version (`v1.json, v2.json …` on the volume), so undo =
-   drop the version. The original is never modified.
-5. **Preview** — thread preview / stitch paths / problems views on canvas;
-   live-updates after every fix.
+   new persisted version (`v1.json, v2.json …` on the volume); the UI always
+   rebuilds from v1 + the current selection, so unticking one fix can never
+   revert another. The original is never modified.
+5. **Preview** — thread / paths / problems views, hover inspection, animated
+   stitch-out with sew-time readout; live-updates after every fix.
 6. **Export** — write the fixed pattern back out to PES/DST/JEF/VP3/EXP and
-   more, and compare Original vs Proposed metrics first.
+   more, compare Original vs Proposed metrics first, and print a
+   before/after **Report** for the client.
 
 The optional LLM explainer (Gemini/Groq free tier) only *interprets*
 findings; the app is fully functional without it.
@@ -31,7 +47,8 @@ findings; the app is fully functional without it.
 |---|---|
 | `POST /api/upload` | upload file → `{pattern_id, metrics, findings}` |
 | `GET /api/pattern/{id}` | metrics + findings for a version |
-| `GET /api/geometry/{id}` | canvas geometry (segments, jumps, trims) |
+| `GET /api/geometry/{id}` | canvas geometry (segments, jumps, trims, stitch indices) |
+| `GET /api/blocks/{id}` | per-colour-block summary (sew-order editor) |
 | `POST /api/fix/{id}` | apply op → new version |
 | `POST /api/undo/{id}` | drop latest version |
 | `POST /api/reset/{id}` | back to v1 |

@@ -6,6 +6,8 @@ Each finding carries:
 - title / detail: human-readable summary
 - locations: indices / coordinates so the canvas can highlight
 - caveats: honesty notes (inferred trims, hoop assumption, round-trip loss)
+- estimated_savings: what applying the fix buys (stitches, trims, seconds) —
+  None for advisory findings, a dict for actionable ones.
 """
 from __future__ import annotations
 
@@ -13,6 +15,7 @@ from typing import Any, Dict, List
 
 from .. import settings
 from . import metrics as _metrics
+from . import sewtime
 
 
 def analyze(pattern, upload_ext: str = "", cfg: dict | None = None) -> Dict[str, Any]:
@@ -34,6 +37,13 @@ def analyze(pattern, upload_ext: str = "", cfg: dict | None = None) -> Dict[str,
             "locations": _short_stitch_locations(pattern, raw, cfg["micro_mm"]),
             "caveats": [],
             "estimated_impact": "none (visual)",
+            "estimated_savings": {
+                "stitches": raw["micro_stitch_count"],
+                "time_seconds": round(
+                    sewtime.stitch_seconds(raw["micro_stitch_count"]), 1),
+                "label": f"−{raw['micro_stitch_count']} stitches · "
+                         f"−{sewtime.fmt_secs(sewtime.stitch_seconds(raw['micro_stitch_count']))}",
+            },
         })
 
     if raw["short_stitch_count"]:
@@ -49,6 +59,7 @@ def analyze(pattern, upload_ext: str = "", cfg: dict | None = None) -> Dict[str,
             "locations": _short_stitch_locations(pattern, raw, cfg["short_mm"]),
             "caveats": ["Short stitches may be intentional (detail fills, outlines)."],
             "estimated_impact": "low",
+            "estimated_savings": None,
         })
 
     long_jumps = [j for j in raw["jumps"] if j["length_mm"] > cfg["long_jump_mm"]]
@@ -74,6 +85,12 @@ def analyze(pattern, upload_ext: str = "", cfg: dict | None = None) -> Dict[str,
                 if not raw["explicit_trim_format"] else []
             ),
             "estimated_impact": "visible cleanup on front",
+            "estimated_savings": {
+                "trims": len(no_trim),
+                "time_seconds": round(sewtime.trim_seconds(len(no_trim)), 1),
+                "label": f"+{len(no_trim)} trims (cleaner front) · "
+                         f"+{sewtime.fmt_secs(sewtime.trim_seconds(len(no_trim)))} sew time",
+            },
         })
 
     if raw["long_stitch_count"]:
@@ -90,6 +107,13 @@ def analyze(pattern, upload_ext: str = "", cfg: dict | None = None) -> Dict[str,
             "locations": _long_stitch_locations(pattern, raw, cfg["long_mm"]),
             "caveats": [],
             "estimated_impact": "low (durability)",
+            "estimated_savings": {
+                "stitches": 0,
+                "added_stitches": raw["long_stitch_count"],
+                "time_seconds": round(
+                    -sewtime.split_seconds(raw["long_stitch_count"]), 1),
+                "label": f"+{raw['long_stitch_count']} anchor stitches (durability)",
+            },
         })
 
     if raw["density_hotspots"]:
@@ -112,11 +136,12 @@ def analyze(pattern, upload_ext: str = "", cfg: dict | None = None) -> Dict[str,
                 f"{cfg['assumed_hoop_mm']} mm and grid sampling; treat as a hint, not a measurement."
             ],
             "estimated_impact": "fabric feel / puckering",
+            "estimated_savings": None,
         })
 
     if raw["isolated_runs"]:
         findings.append({
-            "id": "flag_isolated",
+            "id": "remove_isolated_stitches",
             "op": "remove_isolated_stitches",
             "severity": "info",
             "title": f"{len(raw['isolated_runs'])} isolated stitches",
@@ -128,16 +153,32 @@ def analyze(pattern, upload_ext: str = "", cfg: dict | None = None) -> Dict[str,
             ],
             "caveats": ["Some designs use intentional tie-off stitches."],
             "estimated_impact": "tiny visible dots",
+            "estimated_savings": {
+                "stitches": sum(r["stitches"] for r in raw["isolated_runs"]),
+                "time_seconds": round(sewtime.stitch_seconds(
+                    sum(r["stitches"] for r in raw["isolated_runs"])), 1),
+                "label": f"−{sum(r['stitches'] for r in raw['isolated_runs'])} stitches",
+            },
         })
 
     travel = raw["jump_travel_mm"]
     if raw["jump_count"] and travel > 0:
+        # rough upper bound: reordering can at best halve total jump travel
+        # (each jump to a fresh location must still happen once); we claim a
+        # conservative quarter as "typically recoverable".
+        recoverable = round(travel * 0.25)
+        secs = sewtime.split_seconds(0)  # not stitch-bound; travel-bound below
+        # travel sews at roughly machine speed too (needle up, hoop move)
+        secs = recoverable / settings.MACHINE_SPM * 60.0 * 0.6  # hoop moves slower
         findings.append({
             "id": "reroute_travel",
-            "op": None,  # needs an interactive block-order picker; not auto-fixable
+            "op": "reorder_blocks",
             "severity": "info",
             "title": f"Non-stitch travel: {travel:.0f} mm over {raw['jump_count']} jumps",
-            "detail": "Reordering colour blocks can reduce total needle-up travel.",
+            "detail": (
+                "Reordering colour blocks can reduce total needle-up travel. "
+                "Use the sew-order panel to drag blocks into a shorter path."
+            ),
             "locations": [
                 {"type": "jump", "index": j["index"], "from": j["from"], "to": j["to"]}
                 for j in raw["jumps"][:50]
@@ -146,6 +187,12 @@ def analyze(pattern, upload_ext: str = "", cfg: dict | None = None) -> Dict[str,
                 "Reordering can change which colour sits on top; review the preview carefully."
             ],
             "estimated_impact": "machine time only",
+            "estimated_savings": {
+                "travel_mm": recoverable,
+                "time_seconds": round(secs, 1),
+                "label": f"up to −{sewtime.fmt_mm(recoverable)} travel · "
+                         f"−{sewtime.fmt_secs(secs)} (best case)",
+            },
         })
 
     if raw["color_changes"] == 0 and raw["stops"] == 0 and raw["num_runs"] > 1:
@@ -158,6 +205,7 @@ def analyze(pattern, upload_ext: str = "", cfg: dict | None = None) -> Dict[str,
             "locations": [],
             "caveats": [],
             "estimated_impact": "none",
+            "estimated_savings": None,
         })
 
     raw["findings"] = findings

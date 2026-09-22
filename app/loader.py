@@ -28,7 +28,32 @@ def load_pattern(data: bytes, filename: str) -> pyembroidery.EmbPattern:
         raise ValueError("could not parse embroidery file")
     if not pattern.stitches:
         raise ValueError("file contains no stitch data")
+    normalise_stops(pattern)
     return pattern
+
+
+def normalise_stops(pattern: pyembroidery.EmbPattern) -> None:
+    """PES/PEC encodes colour blocks as STOP commands + a thread palette.
+
+    Convert STOP → COLOR_CHANGE (when the file has no explicit colour
+    changes) so blocks, per-block colours and reorder ops work on home
+    formats; pad the threadlist if duplicate-colour stops collapsed it.
+    """
+    from pyembroidery import COLOR_CHANGE, COMMAND_MASK, STOP, EmbThread
+
+    cmds = [s[2] & COMMAND_MASK for s in pattern.stitches]
+    if COLOR_CHANGE in cmds:
+        return
+    stop_idx = [i for i, c in enumerate(cmds) if c == STOP]
+    if not stop_idx:
+        return
+    for i in stop_idx:
+        pattern.stitches[i][2] = COLOR_CHANGE
+    blocks = len(stop_idx) + 1
+    while len(pattern.threadlist) < blocks:
+        t = EmbThread()
+        t.set_hex_color("#808080")
+        pattern.threadlist.append(t)
 
 
 def pattern_to_bytes(pattern: pyembroidery.EmbPattern, fmt: str) -> bytes:
