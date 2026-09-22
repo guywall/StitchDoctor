@@ -42,6 +42,10 @@ export class SDCompare {
       this.els.bar.hidden = false;
       this.els.slider.value = 50;
       this.viewer.setWipe({ pct: 50, vertical: false, otherGeo: true });
+      // pause the player and hide its bar: the wipe overlay lives at the
+      // canvas bottom and the two rows would collide
+      document.body.classList.add("player-visible");
+      document.dispatchEvent(new CustomEvent("sd:compare", { detail: true }));
     } catch (err) {
       alert(`Compare failed: ${err.message}`);
     }
@@ -51,6 +55,8 @@ export class SDCompare {
     this.active = false;
     this.els.bar.hidden = true;
     this.viewer.setWipe(null);
+    document.body.classList.remove("player-visible");
+    document.dispatchEvent(new CustomEvent("sd:compare", { detail: false }));
   }
 }
 

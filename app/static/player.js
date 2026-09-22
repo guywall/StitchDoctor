@@ -19,6 +19,16 @@ export class SDPlayer {
     this._timeline = null;    // cumulative seconds per stitch event
     this._buildTimeline();
     this._bind();
+    // the compare wipe overlay shares this space — duck out while it's open
+    document.addEventListener("sd:compare", (e) => {
+      this.ui.player.hidden = e.detail ? true : this.hiddenByDefault();
+      if (e.detail) this.pause();
+    });
+  }
+
+  hiddenByDefault() {
+    // the transport only appears once a pattern is loaded
+    return !this.total;
   }
 
   setGeometry(geo) {
@@ -26,7 +36,7 @@ export class SDPlayer {
     this.pos = Math.min(this.pos, this.total);
     this._buildTimeline();
     this._syncUI();
-    this._push();
+    this.viewer.clearProgress();   // constructor: show the full design
   }
 
   _buildTimeline() {
@@ -103,7 +113,11 @@ export class SDPlayer {
   show() {
     this.ui.player.hidden = false;
     this.pos = 0;
-    this._syncUI(); this._push();
+    this.ui.scrub.value = 0;
+    // Full design until the user actually plays — arming the player must
+    // not blank the canvas at stitch 0.
+    this.viewer.clearProgress();
+    this._syncUI();
   }
 
   toggle() { this.playing ? this.pause() : this.play(); }

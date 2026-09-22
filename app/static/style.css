@@ -16,6 +16,9 @@
 
 * { box-sizing: border-box; }
 
+/* the hidden attribute must beat any display: flex/grid set below */
+[hidden] { display: none !important; }
+
 body {
   font-family: system-ui, -apple-system, sans-serif;
   background: var(--bg);
@@ -42,7 +45,14 @@ section {
 /* --- workspace layout ------------------------------------------------------ */
 .workspace { display: flex; gap: 1.4rem; flex-wrap: wrap; }
 .col.left { flex: 0 1 380px; min-width: 320px; }
-.col.right { flex: 1 1 520px; min-width: 380px; }
+.col.right {
+  flex: 1 1 520px; min-width: 380px;
+  position: sticky; top: 0.75rem; align-self: flex-start;
+  z-index: 5;
+}
+/* sticky needs a tall scroll parent: keep the canvas a sane height so the
+   transport + stats stay on screen too */
+.col.right .canvas-wrap canvas { max-height: calc(100vh - 190px); }
 
 .panel-head { display: flex; align-items: baseline; gap: 0.6rem; }
 .pill {
@@ -180,7 +190,9 @@ details.settings summary, details.verify summary {
   transform: translate(12px, 12px);
 }
 
-/* compare bar */
+/* compare bar — overlays the canvas bottom; player is a separate row
+   below the canvas, so the two never overlap. Lift the overlay while
+   the player is also visible to keep both fully clickable. */
 #compare-bar {
   position: absolute; left: 50%; transform: translateX(-50%);
   bottom: 10px; display: flex; align-items: center; gap: 0.5rem;
@@ -188,6 +200,7 @@ details.settings summary, details.verify summary {
   border-radius: 8px; padding: 0.35rem 0.7rem; font-size: 0.78rem;
   z-index: 20;
 }
+body.player-visible #compare-bar { bottom: 10px; opacity: 0.97; }
 #compare-bar input[type="range"] { width: 180px; }
 #compare-bar button {
   background: transparent; color: #f5f1ea; border-color: #6b655c;
