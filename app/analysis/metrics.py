@@ -184,6 +184,8 @@ def analyze(pattern: EmbPattern, cfg: Dict[str, Any] | None = None) -> Dict[str,
 
     explicit_trim_formats = {"dst", "u01", "exp"}
     upload_ext = ""  # filled by caller via format_hint
+    direction = _direction_analysis(runs, cfg)
+    travel_eff = _travel_efficiency(runs, cfg)
     return {
         "total_stitches": total_stitches,
         "num_runs": len(runs),
@@ -209,6 +211,8 @@ def analyze(pattern: EmbPattern, cfg: Dict[str, Any] | None = None) -> Dict[str,
         "density_hotspots": _density_hotspots(runs, cfg),
         "isolated_runs": _isolated_runs(runs, cfg),
         "explicit_trim_format": False,   # set by caller
+        "direction": direction,
+        "travel_efficiency": travel_eff,
         "stitch_lengths": stitch_lengths,
         "runs": runs,
     }
@@ -270,3 +274,130 @@ def _isolated_runs(runs: List[Run], cfg: Dict[str, Any]) -> List[Dict[str, Any]]
                 "stitches": len(run.points) - 1,
             })
     return out[:10]
+
+
+# --- direction consistency (circular statistics) -----------------------------
+
+DIRECTION_MIN_STITCHES = 12
+
+
+def _direction_analysis(runs: List[Run], cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Per-block stitch-direction analysis via axial circular statistics.
+
+    A stitch direction is an *axis* (left-to-right and right-to-left are the
+    same machine direction choice), so angles are doubled before averaging.
+
+    Two measures per run:
+    - mean_turn_deg: the average angle change between consecutive stitches
+      (mod 180°). This is the machine-cost metric: every turn costs the
+      machine a rotation. Smooth satin/curved fills keep this small even
+      when the overall angle sweeps — this is what "jittery" sewing is.
+    - resultant (R): concentration of the doubled angles. Reported for the
+      direction overlay, but NOT used as the finding trigger: a curved fill
+      (a rose petal, say) sweeps its angle deliberately and has low R while
+      sewing perfectly smoothly. Flagging low-R would scold good work.
+    """
+    turn_warn = cfg.get("direction_turn_deg", 20.0)
+    min_n = cfg.get("direction_min_stitches", DIRECTION_MIN_STITCHES)
+    blocks: List[Dict[str, Any]] = []
+    for bi, run in enumerate(runs):
+        pts = run.points
+        if len(pts) < min_n + 1:
+            continue
+        sin_sum = 0.0
+        cos_sum = 0.0
+        turns: List[float] = []
+        prev_axis: Optional[float] = None
+        total = 0.0
+        for a, b in zip(pts, pts[1:]):
+            dx = b[0] - a[0]
+            dy = b[1] - a[1]
+            length = math.hypot(dx, dy)
+            if length < 1e-9:
+                continue
+            total += length
+            theta = math.atan2(dy, dx)      # radians, screen coords (y down)
+            sin_sum += math.sin(2 * theta) * length
+            cos_sum += math.cos(2 * theta) * length
+            axis = theta % math.pi          # mod 180°
+            if prev_axis is not None:
+                d = abs(axis - prev_axis)
+                d = min(d, math.pi - d)     # shortest way around the axis
+                turns.append(math.degrees(d))
+            prev_axis = axis
+        denom = math.hypot(cos_sum, sin_sum)
+        if denom < 1e-9 or not turns:
+            continue
+        mean_axis = 0.5 * math.atan2(sin_sum, cos_sum)
+        r = (denom / total) if total > 0 else 0.0
+        mean_turn = sum(turns) / len(turns)
+        blocks.append({
+            "block_index": bi,
+            "run_index": run.start_index,
+            "color_index": run.color_index,
+            "stitches": len(pts) - 1,
+            "mean_direction_deg": round(math.degrees(mean_axis) % 180.0, 1),
+            "resultant": round(r, 3),
+            "mean_turn_deg": round(mean_turn, 1),
+            "smooth": mean_turn <= turn_warn,
+        })
+    blocks.sort(key=lambda b: -b["mean_turn_deg"])
+    jittery = [b for b in blocks if not b["smooth"]]
+    return {
+        "turn_warn_deg": turn_warn,
+        "min_stitches": min_n,
+        "blocks": blocks[:20],       # worst 20 by mean turn
+        "jittery_count": len(jittery),
+        "jittery_stitches": sum(b["stitches"] for b in jittery),
+    }
+
+
+def _travel_efficiency(runs: List[Run], cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Compare actual needle-up travel to a nearest-neighbour reference.
+
+    The reference is the tour length obtained by always travelling from each
+    block's exit to the nearest remaining block's entry (greedy NN over block
+    endpoints). This is a cheap, stable lower-ish bound: no resequencing can
+    generally beat the NN tour without colour constraints, so the ratio
+    actual/NN measures how much time is lost to ordering alone.
+    """
+    warn = cfg.get("travel_efficiency_warn", 1.6)
+    if len(runs) < 2:
+        return {"actual_mm": 0.0, "reference_mm": 0.0, "ratio": 1.0,
+                "wasted_mm": 0.0, "warn": False, "order": []}
+
+    # actual: travel between consecutive blocks only (excludes intra-block
+    # trims/jumps within a block — those belong to the block, not the order)
+    entries = [run.points[0] for run in runs]
+    exits = [run.points[-1] for run in runs]
+    actual = 0.0
+    for i in range(len(runs) - 1):
+        actual += math.hypot(exits[i][0] - entries[i + 1][0],
+                             exits[i][1] - entries[i + 1][1])
+
+    # greedy nearest-neighbour reference over the same endpoints
+    remaining = set(range(len(runs)))
+    current = 0
+    remaining.discard(current)
+    reference = 0.0
+    order = [current]
+    while remaining:
+        best = min(remaining, key=lambda j: math.hypot(
+            exits[current][0] - entries[j][0],
+            exits[current][1] - entries[j][1]))
+        reference += math.hypot(exits[current][0] - entries[best][0],
+                                exits[current][1] - entries[best][1])
+        current = best
+        remaining.discard(best)
+        order.append(best)
+
+    ratio = actual / reference if reference > 1e-9 else 1.0
+    return {
+        "actual_mm": round(actual, 1),
+        "reference_mm": round(reference, 1),
+        "ratio": round(ratio, 2),
+        "wasted_mm": round(max(0.0, actual - reference), 1),
+        "warn": ratio > warn and actual > 50.0,
+        "order": order[:40],
+        "block_count": len(runs),
+    }

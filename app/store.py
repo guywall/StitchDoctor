@@ -144,6 +144,15 @@ def read_upload(pattern_id: str) -> tuple:
         return fh.read(), meta["upload_ext"]
 
 
+def delete_pattern(pattern_id: str) -> bool:
+    """Remove a pattern and all its versions. Returns True if it existed."""
+    pdir = _pattern_dir(pattern_id)
+    if not os.path.isdir(pdir):
+        return False
+    shutil.rmtree(pdir, ignore_errors=True)
+    return True
+
+
 def pattern_exists(pattern_id: str) -> bool:
     try:
         return os.path.isdir(_pattern_dir(pattern_id)) and bool(list_versions(pattern_id))

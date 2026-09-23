@@ -513,6 +513,116 @@ def merge_blocks(pattern: EmbPattern, index: int = 0, with_index: int = 1) -> Em
     return out
 
 
+def relieve_density(pattern: EmbPattern,
+                    target_per_mm2: Optional[float] = None,
+                    cell_mm: Optional[float] = None) -> EmbPattern:
+    """Thin stitches where colour blocks overlap into over-dense areas.
+
+    Strategy: stitch-level "later block yields". For every grid cell whose
+    total stitch count exceeds the target (cell_mm² × target_per_mm2), the
+    *earlier* blocks keep their stitches in full and *later* blocks are
+    thinned back until the cell meets the cap — so the later colour butts up
+    against the earlier one instead of stacking on top of it.
+
+    Honest limitations (mirrored in the finding's caveats):
+    - this is a blend zone, not a shape-aware boundary — stitch files carry
+      no outlines, so a crisp cut-back is re-digitising territory;
+    - where the top layer is thinned heavily, the under-colour can show
+      through (tone-on-tone designs are ideal; strong contrasts need review);
+    - over-dense cells with only ONE contributing block are left untouched —
+      that is a digitising density problem, not an overlap problem.
+    """
+    target = (target_per_mm2 if target_per_mm2 is not None
+              else settings.DENSITY_STITCHES_PER_MM2)
+    cell = cell_mm if cell_mm is not None else settings.DENSITY_CELL_MM
+    if target <= 0 or cell <= 0:
+        raise ValueError("target_per_mm2 and cell_mm must be positive")
+    cap = max(1, round(target * cell * cell))
+    scale = settings.UNITS_PER_MM
+
+    # --- single walk: classify every record into runs ---------------------
+    # runs[r] = {block, records: [(record_index, x_units, y_units), ...]}
+    # Runs are maximal sequences of STITCH records; needle-up commands end
+    # them. color_index advances on COLOR_CHANGE / NEEDLE_SET (like metrics).
+    runs: list = []
+    cur = None
+    color_index = 0
+    for idx, s in enumerate(pattern.stitches):
+        cmd = s[2] & COMMAND_MASK
+        if cmd == END:
+            break
+        if cmd == STITCH:
+            if cur is None:
+                cur = {"block": color_index, "records": []}
+                runs.append(cur)
+            cur["records"].append((idx, s[0], s[1]))
+        elif cmd in _MOVE_COMMANDS:
+            cur = None
+            if cmd in (COLOR_CHANGE, NEEDLE_SET):
+                color_index += 1
+
+    if len(runs) < 2:
+        raise ValueError("relief applies where colour blocks overlap; "
+                         "this design has fewer than two stitch runs")
+
+    # --- census: stitch count per (cell, block) ----------------------------
+    cell_block: Dict[tuple, Dict[int, list]] = {}
+    for r, run in enumerate(runs):
+        for k, (_idx, xu, yu) in enumerate(run["records"]):
+            key = (int((xu / scale) // cell), int((yu / scale) // cell))
+            cell_block.setdefault(key, {}).setdefault(run["block"], []) \
+                .append((r, k))
+
+    # --- decide drops: first block keeps full coverage, later blocks yield --
+    drop: set = set()   # (run_ordinal, k)
+    for key, by_block in cell_block.items():
+        blocks = sorted(by_block)
+        total = sum(len(by_block[b]) for b in blocks)
+        if total <= cap or len(blocks) < 2:
+            continue  # at target, or single-block density (not overlap)
+        # the earliest block keeps every stitch (coverage guarantee); later
+        # blocks share what's left of the budget. If the first block alone
+        # exceeds the cap, later blocks keep only their anchor stitches —
+        # the residual density belongs to the first block and is reported,
+        # not silently thinned.
+        remaining = cap - len(by_block[blocks[0]])
+        for block in blocks[1:]:
+            refs = sorted(by_block[block])
+            count = len(refs)
+            keep = max(0, min(count, remaining))
+            remaining -= keep
+            drop_count = count - keep
+            # never drop the run's first or last stitch in this cell — the
+            # run's entry punch and exit connection must survive
+            drop_count = min(drop_count, count - 2)
+            if drop_count <= 0:
+                continue
+            step = count / (drop_count + 1)
+            for i in range(drop_count):
+                pos = max(1, min(count - 2, int(step * (i + 1))))
+                drop.add(refs[pos])
+
+    if not drop:
+        raise ValueError(
+            "no relief possible: over-dense cells (if any) come from a single "
+            "block, not from colour overlap")
+
+    # --- rebuild: skip dropped records, copy everything else verbatim ------
+    skip_records = {runs[r]["records"][k][0] for r, k in drop}
+
+    out = EmbPattern()
+    for idx, s in enumerate(pattern.stitches):
+        cmd = s[2] & COMMAND_MASK
+        if cmd == END:
+            break
+        if idx in skip_records:
+            continue
+        out.add_stitch_absolute(cmd, s[0], s[1])
+    out.add_command(END)
+    _copy_threads(pattern, out)
+    return out
+
+
 OPS: OpsMap = {
     "remove_micro_stitches": remove_micro_stitches,
     "add_trims": add_trims,
@@ -523,4 +633,5 @@ OPS: OpsMap = {
     "reverse_block": reverse_block,
     "delete_block": delete_block,
     "merge_blocks": merge_blocks,
+    "relieve_density": relieve_density,
 }

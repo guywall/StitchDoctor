@@ -271,3 +271,20 @@ body.player-visible #compare-bar { bottom: 10px; opacity: 0.97; }
   header, #app-section, #upload-section, .no-print { display: none !important; }
   #report-section { display: block !important; border: none; box-shadow: none; }
 }
+
+/* priority selector */
+.priority-group { display: flex; gap: 0.4rem; }
+.prio-btn {
+  padding: 0.3rem 0.9rem;
+  border: 1px solid var(--border, #bbb);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.prio-btn.active {
+  background: #2c5aa0;
+  color: #fff;
+  border-color: #2c5aa0;
+}
+.priority-hint { margin-top: 0.3rem; }

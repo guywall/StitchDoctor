@@ -42,6 +42,16 @@ DENSITY_CELL_MM = 5.0
 DENSITY_MIN_STITCHES = 120     # don't flag density on tiny designs
 ISOLATED_RUN_MM = 4.0          # single stitch run far from others
 
+# Direction smoothness: average angle change between consecutive stitches
+# (mod 180°) within a run. Above the threshold a run is "jittery" — the
+# machine turns more than it sews. Curved fills sweep smoothly and stay low.
+DIRECTION_TURN_WARN = 20.0
+# Min run stitch count before direction is meaningful at all.
+DIRECTION_MIN_STITCHES = 12
+# Travel efficiency: actual non-stitch travel vs nearest-neighbour lower
+# bound between block endpoints. Above this ratio, ordering is wasteful.
+TRAVEL_EFFICIENCY_WARN = 1.6
+
 # Density caveat: density is measured against an assumed hoop area.
 ASSUMED_HOOP_MM = 100.0
 
@@ -60,7 +70,13 @@ ANALYSIS_SETTING_BOUNDS = {
     "density_per_mm2": (2.0, 60.0),
     "density_cell_mm": (2.0, 20.0),
     "isolated_mm": (1.0, 50.0),
+    "direction_turn_deg": (5.0, 90.0),
+    "travel_efficiency_warn": (1.0, 5.0),
 }
+
+# What the optimisation priorities optimise for. Used to rank suggestions
+# and to choose default severities; never changes metrics themselves.
+PRIORITY_MODES = ["speed", "balanced", "quality"]
 
 
 def default_cfg() -> dict:
@@ -74,6 +90,9 @@ def default_cfg() -> dict:
         "density_cell_mm": DENSITY_CELL_MM,
         "density_min_stitches": DENSITY_MIN_STITCHES,
         "isolated_mm": ISOLATED_RUN_MM,
+        "direction_turn_deg": DIRECTION_TURN_WARN,
+        "travel_efficiency_warn": TRAVEL_EFFICIENCY_WARN,
+        "priority": "balanced",
         "assumed_hoop_mm": ASSUMED_HOOP_MM,
     }
 
@@ -92,6 +111,10 @@ def effective_cfg(overrides: dict | None) -> dict:
             continue
         lo, hi = ANALYSIS_SETTING_BOUNDS[key]
         cfg[key] = max(lo, min(hi, num))
+    prio = str(overrides.get("priority") or cfg.get("priority") or "balanced")
+    if prio not in PRIORITY_MODES:
+        prio = "balanced"
+    cfg["priority"] = prio
     return cfg
 
 # --- Optional LLM explainer (strictly additive) ------------------------------

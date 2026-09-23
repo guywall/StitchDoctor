@@ -119,12 +119,14 @@ def analyze(pattern, upload_ext: str = "", cfg: dict | None = None) -> Dict[str,
     if raw["density_hotspots"]:
         findings.append({
             "id": "flag_density",
-            "op": None,  # advisory only
-            "severity": "info",
+            "op": "relieve_density",
+            "severity": "warn",
             "title": f"{len(raw['density_hotspots'])} dense regions",
             "detail": (
                 "Areas where stitch density far exceeds the design average — "
-                "prone to stiff, puckered fabric."
+                "prone to stiff, puckered fabric. Where the density comes from "
+                "two colour blocks overlapping, the fix thins the later block "
+                "so the colours butt up against each other instead of stacking."
             ),
             "locations": [
                 {"type": "density", "x": h["x_mm"], "y": h["y_mm"],
@@ -133,10 +135,15 @@ def analyze(pattern, upload_ext: str = "", cfg: dict | None = None) -> Dict[str,
             ],
             "caveats": [
                 "Density assumes a hoop area of "
-                f"{cfg['assumed_hoop_mm']} mm and grid sampling; treat as a hint, not a measurement."
+                f"{cfg['assumed_hoop_mm']} mm and grid sampling; treat as a hint, not a measurement.",
+                "Relief only applies where blocks OVERLAP: single-block density "
+                "is a digitising style and is left untouched.",
+                "Thinning the top colour can let the under-colour show through "
+                "— ideal on tone-on-tone, review strong contrasts on the canvas.",
             ],
             "estimated_impact": "fabric feel / puckering",
             "estimated_savings": None,
+            "priority_hint": "quality",
         })
 
     if raw["isolated_runs"]:
@@ -161,32 +168,47 @@ def analyze(pattern, upload_ext: str = "", cfg: dict | None = None) -> Dict[str,
             },
         })
 
+    # --- travel efficiency -------------------------------------------------
+    te = raw.get("travel_efficiency") or {}
     travel = raw["jump_travel_mm"]
     if raw["jump_count"] and travel > 0:
         # rough upper bound: reordering can at best halve total jump travel
         # (each jump to a fresh location must still happen once); we claim a
         # conservative quarter as "typically recoverable".
         recoverable = round(travel * 0.25)
-        secs = sewtime.split_seconds(0)  # not stitch-bound; travel-bound below
         # travel sews at roughly machine speed too (needle up, hoop move)
         secs = recoverable / settings.MACHINE_SPM * 60.0 * 0.6  # hoop moves slower
+        title = f"Non-stitch travel: {travel:.0f} mm over {raw['jump_count']} jumps"
+        detail = (
+            "Reordering colour blocks can reduce total needle-up travel. "
+            "Use the sew-order panel to drag blocks into a shorter path."
+        )
+        severity = "info"
+        if te.get("warn"):
+            severity = "warn"
+            title = (f"Inefficient running order — {te['wasted_mm']:.0f} mm "
+                     "excess travel")
+            detail = (
+                f"Needle-up travel is {te['actual_mm']:.0f} mm, but visiting the "
+                f"same work nearest-first needs only ~{te['reference_mm']:.0f} mm "
+                f"({te['ratio']:.1f}× worse than the reference). " + detail)
         findings.append({
             "id": "reroute_travel",
             "op": "reorder_blocks",
-            "severity": "info",
-            "title": f"Non-stitch travel: {travel:.0f} mm over {raw['jump_count']} jumps",
-            "detail": (
-                "Reordering colour blocks can reduce total needle-up travel. "
-                "Use the sew-order panel to drag blocks into a shorter path."
-            ),
+            "severity": severity,
+            "title": title,
+            "detail": detail,
             "locations": [
                 {"type": "jump", "index": j["index"], "from": j["from"], "to": j["to"]}
                 for j in raw["jumps"][:50]
             ],
             "caveats": [
-                "Reordering can change which colour sits on top; review the preview carefully."
+                "The reference is a nearest-neighbour tour — a true optimum can "
+                "only be better, never worse.",
+                "Reordering can change which colour sits on top; review the preview.",
             ],
             "estimated_impact": "machine time only",
+            "priority_hint": "speed",
             "estimated_savings": {
                 "travel_mm": recoverable,
                 "time_seconds": round(secs, 1),
@@ -194,6 +216,70 @@ def analyze(pattern, upload_ext: str = "", cfg: dict | None = None) -> Dict[str,
                          f"−{sewtime.fmt_secs(secs)} (best case)",
             },
         })
+
+    # --- stitch direction smoothness ----------------------------------------
+    direction = raw.get("direction") or {}
+    jittery = [b for b in direction.get("blocks", []) if not b["smooth"]]
+    if jittery:
+        worst = jittery[0]
+        findings.append({
+            "id": "flag_direction",
+            "op": None,  # re-angling fills = re-digitising; advisory only
+            "severity": "warn",
+            "title": f"{len(jittery)} runs with jittery stitch direction",
+            "detail": (
+                f"Worst run turns {worst['mean_turn_deg']:.0f}\u00b0 per stitch on "
+                f"average ({cfg['direction_turn_deg']:.0f}\u00b0 or less is smooth). "
+                "Every turn costs the machine a rotation and can shade thread "
+                "twist unevenly. Smooth sewing keeps one direction per run, "
+                "sweeping gradually for curves; consider re-angling or splitting "
+                "this fill into direction bands."
+            ),
+            "locations": [
+                {"type": "run", "run_index": b["run_index"],
+                 "x": None, "y": None, "block_index": b["block_index"],
+                 "mean_direction_deg": b["mean_direction_deg"],
+                 "mean_turn_deg": b["mean_turn_deg"]}
+                for b in jittery[:5]
+            ],
+            "caveats": [
+                "Measured per run between needle-up moves; short detail runs "
+                f"(under {direction.get('min_stitches', 12)} stitches) are excluded.",
+                "Fixing this means re-angling fills \u2014 a re-digitising job, not "
+                "an automatic transform. Use the direction overlay to see it.",
+            ],
+            "estimated_impact": "smoothness / sheen / speed",
+            "priority_hint": "quality",
+        })
+
+    _apply_priority(findings, cfg.get("priority", "balanced"))
+
+    raw["findings"] = findings
+    return raw
+
+
+def _apply_priority(findings: List[Dict[str, Any]], priority: str) -> None:
+    """Re-rank and re-severity findings for the chosen optimisation goal.
+
+    - speed:    travel/order problems surface first and loudest
+    - quality:  density, direction and stitch-length issues first
+    - balanced: severity order as computed (default)
+    """
+    if priority not in ("speed", "quality"):
+        return
+    rank_speed = {"reroute_travel": 0, "add_trims": 1, "remove_micro_stitches": 2,
+                  "split_long_stitches": 3}
+    rank_quality = {"flag_density": 0, "flag_direction": 1, "flag_short_stitches": 2,
+                    "split_long_stitches": 3, "remove_isolated_stitches": 4}
+    rank = rank_speed if priority == "speed" else rank_quality
+    findings.sort(key=lambda f: (rank.get(f["id"], 10),
+                                 {"high": 0, "warn": 1, "info": 2}[f["severity"]]))
+    for f in findings:
+        hint = f.get("priority_hint")
+        if hint == priority and f["severity"] == "info":
+            f["severity"] = "warn"
+        elif hint and hint != priority and f["severity"] == "warn":
+            f["severity"] = "info"
 
     if raw["color_changes"] == 0 and raw["stops"] == 0 and raw["num_runs"] > 1:
         findings.append({

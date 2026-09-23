@@ -23,8 +23,9 @@ from .analysis import findings as findings_mod
 from .llm import explain as llm_explain
 from .loader import load_pattern, pattern_to_bytes
 from .render.geometry import DEFAULT_PALETTE, geometry
-from .store import (append_version, create_pattern, drop_versions_above,
-                    latest_version, list_versions, load_version,
+from .store import (append_version, create_pattern,
+                    delete_pattern as store_delete_pattern,
+                    drop_versions_above, latest_version, list_versions, load_version,
                     pattern_exists, prune_expired, read_meta, update_meta,
                     start_prune_thread)
 from .transforms import ops as ops_mod
@@ -350,6 +351,14 @@ def _pattern_state(pid: str) -> Dict[str, Any]:
         "cfg": read_meta(pid).get("cfg"),
         **_summary(load_version(pid, latest), ext, read_meta(pid).get("cfg")),
     }
+
+
+@app.delete("/api/pattern/{pid}")
+def remove_pattern(pid: str) -> Dict[str, Any]:
+    """Delete a pattern and all its stored versions (user cleanup / test harness)."""
+    if not store_delete_pattern(pid):
+        raise HTTPException(404, "Unknown pattern id")
+    return {"deleted": pid}
 
 
 @app.get("/api/compare/{pid}")

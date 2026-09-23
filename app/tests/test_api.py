@@ -216,3 +216,117 @@ def test_verify_roundtrip_matches(client, tmp_path):
     w = body["working"]["metrics"]["total_stitches"]
     r = body["reimported"]["metrics"]["total_stitches"]
     assert body["stitch_delta"] == r - w
+
+
+# ---------------------------------------------------------------------------
+# relieve_density: overlap thinning
+# relieve_density: overlap thinning with "first block keeps coverage"
+
+
+def _overlap_pattern():
+    """Two fully overlapping blocks (red then blue), rows every 1 mm."""
+    from pyembroidery import EmbPattern, STITCH, JUMP, COLOR_CHANGE
+    from pyembroidery.EmbThread import EmbThread
+    p = EmbPattern()
+    for row in range(40):
+        x = row
+        for k in range(21):
+            p.add_stitch_absolute(STITCH, x * 10, k * 10)
+        if row < 39:
+            p.add_stitch_absolute(JUMP, (x + 1) * 10, 0)
+    p.add_command(COLOR_CHANGE)
+    for row in range(40):
+        x = row
+        for k in range(21):
+            p.add_stitch_absolute(STITCH, x * 10 + 5, k * 10 + 5)
+        if row < 39:
+            p.add_stitch_absolute(JUMP, (x + 1) * 10 + 5, 5)
+    t1, t2 = EmbThread(), EmbThread()
+    t1.set_color(255, 0, 0)
+    t2.set_color(0, 0, 255)
+    p.threadlist = [t1, t2]
+    return p
+
+
+def test_relieve_density_overlap():
+    """First block keeps full coverage; later block thinned to anchors."""
+    from pyembroidery import STITCH, COLOR_CHANGE
+    from app.transforms.ops import relieve_density
+    out = relieve_density(_overlap_pattern(), target_per_mm2=1.0, cell_mm=5)
+    blocks = {}
+    blk = 0
+    for s in out.stitches:
+        c = s[2] & 0xFF
+        if c == COLOR_CHANGE:
+            blk += 1
+        elif c == STITCH:
+            blocks[blk] = blocks.get(blk, 0) + 1
+    assert blocks[0] == 840, "first block must keep every stitch"
+    assert 0 < blocks[1] < 840, "later block must be thinned, not erased"
+    assert sum(1 for s in out.stitches
+               if (s[2] & 0xFF) == COLOR_CHANGE) == 1
+
+
+def test_relieve_density_single_block_refuses():
+    """Single-block density is a digitising style, not overlap — refuse."""
+    from pyembroidery import EmbPattern, STITCH, JUMP
+    from app.transforms.ops import relieve_density
+    p = EmbPattern()
+    for row in range(40):
+        x = row
+        for k in range(21):
+            p.add_stitch_absolute(STITCH, x * 10, k * 10)
+        if row < 39:
+            p.add_stitch_absolute(JUMP, (x + 1) * 10, 0)
+    with pytest.raises(ValueError):
+        relieve_density(p, target_per_mm2=1.0, cell_mm=5)
+
+
+def _contrast_pattern():
+    """Sparse field with a dense two-block overlap patch (local contrast)."""
+    from pyembroidery import EmbPattern, STITCH, JUMP, COLOR_CHANGE
+    p = EmbPattern()
+    for y in range(0, 60, 8):            # sparse field, block A
+        for x in range(0, 60):
+            p.add_stitch_absolute(STITCH, x * 10, y * 10)
+        if y + 8 < 60:
+            p.add_stitch_absolute(JUMP, 0, (y + 8) * 10)
+    for y2 in range(0, 40):              # dense patch, block A (0.5 mm grid)
+        yy = y2 * 0.5
+        for x in range(0, 40):
+            p.add_stitch_absolute(STITCH, int(x * 5), int(yy * 10))
+        p.add_stitch_absolute(JUMP, 0, int(yy * 10) + 5)
+    p.add_command(COLOR_CHANGE)
+    for y2 in range(0, 40):              # dense patch, block B (overlaps A)
+        yy = y2 * 0.5
+        for x in range(0, 40):
+            p.add_stitch_absolute(STITCH, int(x * 5) + 3, int(yy * 10) + 3)
+        p.add_stitch_absolute(JUMP, 3, int(yy * 10) + 8)
+    return p
+
+
+def test_density_finding_offers_relief_when_triggered():
+    """flag_density must carry the relieve_density op (lowered threshold)."""
+    from app.analysis import findings
+    r = findings.analyze(_contrast_pattern(),
+                         cfg={**findings.settings.default_cfg(),
+                              "density_per_mm2": 0.5, "density_min_stitches": 100})
+    dens = next((f for f in r["findings"] if f["id"] == "flag_density"), None)
+    assert dens is not None, "contrast fixture should produce a hotspot"
+    assert dens["op"] == "relieve_density"
+    assert any("OVERLAP" in c for c in dens["caveats"])
+
+
+def test_relieve_density_via_api(client, tmp_path):
+    """The op applies through the API on a real overlap design."""
+    import io
+    from app.loader import pattern_to_bytes
+    data = pattern_to_bytes(_overlap_pattern(), "pes")
+    up = client.post("/api/upload", files={
+        "file": ("ov.pes", io.BytesIO(data), "application/octet-stream")}).json()
+    res = client.post(f"/api/fix/{up['pattern_id']}",
+                      json={"op": "relieve_density",
+                            "params": {"target_per_mm2": 1.0, "cell_mm": 5}})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["metrics"]["total_stitches"] < up["metrics"]["total_stitches"]

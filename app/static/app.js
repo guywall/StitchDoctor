@@ -200,6 +200,14 @@ const SETTING_LABELS = {
   density_per_mm2: "Density warning (stitches/mm²)",
   density_cell_mm: "Density grid cell (mm)",
   isolated_mm: "Isolated-stitch distance (mm)",
+  direction_turn_deg: "Direction smoothness (° mean turn)",
+  travel_efficiency_warn: "Travel efficiency warn (× nearest-first)",
+};
+
+const PRIORITY_INFO = {
+  speed: "Machine time first: travel/order and trim issues surface first and loudest.",
+  balanced: "Default: findings ranked by severity as measured.",
+  quality: "Surface quality first: density, direction and stitch-length issues first.",
 };
 
 function renderSettingsPanel() {
@@ -211,6 +219,24 @@ function renderSettingsPanel() {
     return;
   }
   const { bounds } = state.configSchema;
+  // priority selector at the top
+  const prioRow = document.createElement("div");
+  prioRow.className = "setting-row priority-row";
+  prioRow.innerHTML = `
+    <label>Optimise for</label>
+    <div class="priority-group">
+      ${["speed", "balanced", "quality"].map((m) => `
+        <button type="button" class="prio-btn${state.cfg.priority === m ? " active" : ""}" data-prio="${m}">${m}</button>`).join("")}
+    </div>
+    <div class="hint priority-hint">${PRIORITY_INFO[state.cfg.priority] || ""}</div>
+  `;
+  prioRow.querySelectorAll(".prio-btn").forEach((b) =>
+    b.addEventListener("click", () => {
+      state.cfg.priority = b.dataset.prio;
+      renderSettingsPanel();
+      onSettingChanged();
+    }));
+  panel.appendChild(prioRow);
   for (const [key, label] of Object.entries(SETTING_LABELS)) {
     if (!(key in state.cfg)) continue;
     const [lo, hi] = bounds[key] || [0, 100];
@@ -445,6 +471,119 @@ function toggleHighlight(findingId, card) {
 
 function findingById(id) {
   return state.findings.find((f) => f.id === id) || null;
+}
+
+// shared overlay helpers used by the studio viewer
+function locationBounds(locations) {
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  const stitchSegs = (state.geometry && state.geometry.segments || [])
+    .filter((s) => s.type === "stitch");
+  for (const loc of locations) {
+    let pts = [];
+    if (loc.type === "jump") pts = [[loc.from[0], loc.from[1]], [loc.to[0], loc.to[1]]];
+    else if (loc.type === "stitch") pts = [[loc.from[0], loc.from[1]], [loc.to[0], loc.to[1]]];
+    else if (loc.type === "density") pts = [[loc.x, loc.y]];
+    else if (loc.type === "run") {
+      // run locations carry no coordinates; resolve to the nth stitch segment
+      const seg = stitchSegs[loc.run_index];
+      if (seg) pts = seg.points;
+    }
+    for (const [x, y] of pts) {
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+  }
+  if (minX === Infinity) return null;
+  return { minX, maxX, minY, maxY };
+}
+
+// density heat cells — drawn whenever hotspots exist, in every view
+function drawDensityOverlay(ctx, toX, toY) {
+  const hotspots = state.metrics.density_hotspots || [];
+  if (!hotspots.length) return;
+  const cell = (state.cfg && state.cfg.density_cell_mm) || 5;
+  for (const h of hotspots) {
+    const half = cell / 2;
+    const x0 = toX(h.x_mm - half), y0 = toY(h.y_mm + half);
+    const w = (cell) * (toX(h.x_mm + half) - toX(h.x_mm - half));
+    const h2 = (cell) * (toY(h.y_mm - half) - toY(h.y_mm + half));
+    const worst = h.stitches_per_mm2 / ((state.cfg && state.cfg.density_per_mm2) || 12);
+    const alpha = Math.min(0.15 + 0.45 * (worst - 1), 0.75);
+    ctx.fillStyle = `rgba(179, 42, 42, ${alpha.toFixed(2)})`;
+    ctx.fillRect(x0, y0, w, Math.abs(h2));
+    ctx.strokeStyle = "rgba(179, 42, 42, 0.9)";
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(x0, y0, w, Math.abs(h2));
+    // density label
+    ctx.fillStyle = "rgba(120, 10, 10, 0.95)";
+    ctx.font = "bold 11px system-ui";
+    ctx.fillText(`${h.stitches_per_mm2}/mm²`, x0, y0 - 3);
+  }
+}
+
+// markers for stitch/jump problems (+ highlighted finding emphasis)
+function drawProblemMarkers(ctx, toX, toY, hl) {
+  const drawJumpSet = (jumps, color, width) => {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    for (const j of jumps) {
+      ctx.beginPath();
+      ctx.moveTo(toX(j.from[0]), toY(j.from[1]));
+      ctx.lineTo(toX(j.to[0]), toY(j.to[1]));
+      ctx.stroke();
+    }
+  };
+  const longJumps = state.jumps.filter(
+    (j) => j.length_mm > ((state.cfg && state.cfg.long_jump_mm) || 12)
+  );
+  const untrimmed = longJumps.filter((j) => !j.after_trim);
+  if (state.view === "problems") {
+    drawJumpSet(untrimmed, "rgba(255,0,0,0.8)", 2.5);
+    if (longJumps.length > untrimmed.length) {
+      drawJumpSet(longJumps.filter((j) => j.after_trim), "rgba(255,140,0,0.55)", 2);
+    }
+  }
+  if (hl) {
+    const locJumps = hl.locations.filter((l) => l.type === "jump");
+    drawJumpSet(locJumps.map((l) => ({ from: l.from, to: l.to })), "#00b3ff", 3);
+    // run locations (direction finding): overlay the whole run thick
+    const runLocs = hl.locations.filter((l) => l.type === "run");
+    if (runLocs.length) {
+      const stitchSegs = (state.geometry && state.geometry.segments || [])
+        .filter((s) => s.type === "stitch");
+      ctx.strokeStyle = "#00b3ff";
+      ctx.lineWidth = 3;
+      for (const l of runLocs) {
+        const seg = stitchSegs[l.run_index];
+        if (!seg) continue;
+        ctx.beginPath();
+        ctx.moveTo(toX(seg.points[0][0]), toY(seg.points[0][1]));
+        for (const [x, y] of seg.points.slice(1)) ctx.lineTo(toX(x), toY(y));
+        ctx.stroke();
+      }
+    }
+  }
+
+  // short/long stitch locations as dots (advisory + splittable findings)
+  for (const f of state.findings) {
+    const locs = (f.locations || []).filter((l) => l.type === "stitch");
+    if (!locs.length) continue;
+    const isHl = state.highlight === f.id;
+    if (state.view !== "problems" && !isHl) continue;
+    ctx.fillStyle = f.id === "remove_micro_stitches"
+      ? (isHl ? "#b3424a" : "rgba(179,66,74,0.45)")
+      : (isHl ? "#e08a00" : "rgba(224,138,0,0.4)");
+    const r = isHl ? 4 : 2.5;
+    for (const l of locs) {
+      const sx = toX(l.to[0]), sy = toY(l.to[1]);
+      if (sx < -10 || sx > canvas.width + 10 || sy < -10 || sy > canvas.height + 10) continue;
+      ctx.beginPath();
+      ctx.arc(sx, sy, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
 }
 
 function setLegend() {
