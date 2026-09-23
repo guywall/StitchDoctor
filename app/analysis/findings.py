@@ -252,6 +252,19 @@ def analyze(pattern, upload_ext: str = "", cfg: dict | None = None) -> Dict[str,
             "priority_hint": "quality",
         })
 
+    if raw["color_changes"] == 0 and raw["stops"] == 0 and raw["num_runs"] > 1:
+        findings.append({
+            "id": "flag_monochrome",
+            "op": None,
+            "severity": "info",
+            "title": "Single-colour design with multiple runs",
+            "detail": "No colour changes found; runs are joined by jumps/trims only.",
+            "locations": [],
+            "caveats": [],
+            "estimated_impact": "none",
+            "estimated_savings": None,
+        })
+
     _apply_priority(findings, cfg.get("priority", "balanced"))
 
     raw["findings"] = findings
@@ -280,22 +293,6 @@ def _apply_priority(findings: List[Dict[str, Any]], priority: str) -> None:
             f["severity"] = "warn"
         elif hint and hint != priority and f["severity"] == "warn":
             f["severity"] = "info"
-
-    if raw["color_changes"] == 0 and raw["stops"] == 0 and raw["num_runs"] > 1:
-        findings.append({
-            "id": "flag_monochrome",
-            "op": None,
-            "severity": "info",
-            "title": "Single-colour design with multiple runs",
-            "detail": "No colour changes found; runs are joined by jumps/trims only.",
-            "locations": [],
-            "caveats": [],
-            "estimated_impact": "none",
-            "estimated_savings": None,
-        })
-
-    raw["findings"] = findings
-    return raw
 
 
 # --- location helpers --------------------------------------------------------

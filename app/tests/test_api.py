@@ -1,4 +1,5 @@
 """API smoke tests via FastAPI TestClient (in-memory, /data patched to tmp)."""
+import json
 import os
 import sys
 
@@ -330,3 +331,19 @@ def test_relieve_density_via_api(client, tmp_path):
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["metrics"]["total_stitches"] < up["metrics"]["total_stitches"]
+
+
+def test_priority_via_api(client, tmp_path):
+    """cfg priority flows through the API without 500s or finding drift."""
+    dst = _make_dst(tmp_path)
+    with open(dst, "rb") as fh:
+        up = client.post("/api/upload",
+                         files={"file": ("t.dst", fh, "application/octet-stream")}).json()
+    pid = up["pattern_id"]
+    base_ids = sorted(f["id"] for f in up["findings"])
+    r = client.get(f"/api/pattern/{pid}",
+                   params={"cfg": json.dumps({"priority": "speed"})})
+    assert r.status_code == 200, r.text
+    ids = sorted(f["id"] for f in r.json()["findings"])
+    assert ids == base_ids
+    assert r.json()["findings"][0]["id"] == "reroute_travel" or len(base_ids) <= 1

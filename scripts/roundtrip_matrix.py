@@ -69,9 +69,10 @@ def snapshot(summary: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "total_stitches": m.get("total_stitches"),
         "jump_count": m.get("jump_count"),
-        "trim_count": m.get("trim_count"),
-        "block_count": m.get("block_count"),
-        "bounds": summary.get("bounds") or m.get("bounds"),
+        "trim_count": m.get("trims"),
+        "block_count": (m.get("color_changes", 0) + 1)
+            if m.get("color_changes") is not None else None,
+        "bounds": summary.get("extents") or m.get("extents"),
     }
 
 
@@ -129,10 +130,10 @@ def main() -> int:
                 if rt[f] != src[f]:
                     diffs.append(f"{f}: {src[f]} -> {rt[f]}")
             if rt["bounds"] and src["bounds"]:
-                bw = abs((rt["bounds"][2] - rt["bounds"][0])
-                         - (src["bounds"][2] - src["bounds"][0]))
-                bh = abs((rt["bounds"][3] - rt["bounds"][1])
-                         - (src["bounds"][3] - src["bounds"][1]))
+                bw = abs((rt["bounds"]["max_x_mm"] - rt["bounds"]["min_x_mm"])
+                         - (src["bounds"]["max_x_mm"] - src["bounds"]["min_x_mm"]))
+                bh = abs((rt["bounds"]["max_y_mm"] - rt["bounds"]["min_y_mm"])
+                         - (src["bounds"]["max_y_mm"] - src["bounds"]["min_y_mm"]))
                 if bw > 0.5 or bh > 0.5:
                     diffs.append(f"bounds: {src['bounds']} -> {rt['bounds']}")
                     hard_fail = hard_fail or fmt not in ("dst", "exp", "u01")
@@ -175,10 +176,13 @@ def main() -> int:
 
     # cleanup: delete the uploaded pattern so we don't leave junk behind
     try:
-        http_json(args.base, f"/api/delete/{pid}", {})
+        req = urllib.request.Request(args.base + f"/api/pattern/{pid}",
+                                     method="DELETE")
+        with urllib.request.urlopen(req, timeout=60):
+            pass
         print(f"\n(cleaned up test pattern {pid})")
     except Exception:  # noqa: BLE001
-        print(f"\n(note: test pattern {pid} left on server; delete endpoint missing?)")
+        print(f"\n(note: test pattern {pid} left on server; delete failed)")
 
     return 0 if all_ok else 1
 

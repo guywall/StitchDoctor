@@ -289,3 +289,15 @@ def test_store_versions(tmp_path, monkeypatch):
     assert store.list_versions(pid) == [1, 2]
     store.drop_versions_above(pid, 1)
     assert store.list_versions(pid) == [1]
+
+
+def test_priority_never_drops_or_duplicates_findings(pattern):
+    """The three priority modes must return the same finding set."""
+    base = findings_mod.analyze(pattern, upload_ext=".dst")
+    base_ids = sorted(f["id"] for f in base["findings"])
+    for mode in ("speed", "quality", "balanced"):
+        cfg = findings_mod.settings.default_cfg()
+        cfg["priority"] = mode
+        result = findings_mod.analyze(pattern, upload_ext=".dst", cfg=cfg)
+        assert sorted(f["id"] for f in result["findings"]) == base_ids, (
+            f"priority '{mode}' changed the finding set")
